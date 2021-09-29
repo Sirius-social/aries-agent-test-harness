@@ -1,0 +1,24 @@
+FROM python:3.8-slim
+
+RUN mkdir -p /aries-backchannels
+WORKDIR /aries-backchannels
+
+COPY python/requirements.txt python/
+COPY indiLynxPython/requirements-latest.txt indiLynxPython/
+RUN pip install -r python/requirements.txt -r indiLynxPython/requirements-latest.txt
+
+# Copy the necessary files from the AATH Backchannel sub-folders
+COPY python python
+COPY acapy acapy
+COPY data ./
+
+# aca-py is in /usr/local/bin. The Backchannel is looking for it in ./bin, create a link to it in ./bin
+RUN mkdir -p ./bin
+RUN ln -s /usr/local/bin/aca-py ./bin/aca-py
+
+ENV PYTHONPATH=/aries-backchannels
+ENV RUNMODE=docker
+
+RUN ./bin/aca-py --version > ./acapy-version.txt
+
+ENTRYPOINT ["python", "indiLynxPython/indilynx_backchannel.py"]
