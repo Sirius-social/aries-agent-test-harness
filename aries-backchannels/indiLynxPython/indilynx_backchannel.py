@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import uuid
 
 from timeit import default_timer
 from typing import Tuple
@@ -30,6 +31,7 @@ from python.storage import (
     pop_resource,
     pop_resource_latest,
 )
+import sirius_sdk
 
 # from helpers.jsonmapper.json_mapper import JsonMapper
 
@@ -78,92 +80,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         self.auto_respond_presentation_proposal = False
         self.auto_respond_presentation_request = False
 
-        # Aca-py : RFC
-        self.connectionStateTranslationDict = {
-            "invitation": "invited",
-            "request": "requested",
-            "response": "responded",
-            "active": "complete",
-        }
-
-        # Aca-py : RFC
-        self.issueCredentialStateTranslationDict = {
-            "proposal_sent": "proposal-sent",
-            "proposal_received": "proposal-received",
-            "offer_sent": "offer-sent",
-            "offer_received": "offer-received",
-            "request_sent": "request-sent",
-            "request_received": "request-received",
-            "credential_issued": "credential-issued",
-            "credential_received": "credential-received",
-            "credential_acked": "done",
-        }
-
-        # AATH API : Acapy Admin API
-        self.issueCredentialv2OperationTranslationDict = {
-            "send-proposal": "send-proposal",
-            "send-offer": "send-offer",
-            "send-request": "send-request",
-            "issue": "issue",
-            "store": "store",
-        }
-
-        # AATH API : Acapy Admin API
-        self.proofv2OperationTranslationDict = {
-            "create-send-connectionless-request": "create-request",
-            "send-presentation": "send-presentation",
-            "send-request": "send-request",
-            "verify-presentation": "verify-presentation",
-            "send-proposal": "send-proposal",
-        }
-
-        # AATH API : Acapy Admin API
-        self.TopicTranslationDict = {
-            "issue-credential": "/issue-credential/",
-            "issue-credential-v2": "/issue-credential-2.0/",
-            "proof-v2": "/present-proof-2.0/",
-        }
-
-        self.credFormatFilterTranslationDict = {"indy": "indy", "json-ld": "ld_proof"}
-
-        self.proofTypeKeyTypeTranslationDict = {
-            "Ed25519Signature2018": "ed25519",
-            "BbsBlsSignature2020": "bls12381g2",
-        }
-
-        # Aca-py : RFC
-        self.presentProofStateTranslationDict = {
-            "request_sent": "request-sent",
-            "request_received": "request-received",
-            "proposal_sent": "proposal-sent",
-            "proposal_received": "proposal-received",
-            "presentation_sent": "presentation-sent",
-            "presentation_received": "presentation-received",
-            "reject_sent": "reject-sent",
-            "verified": "done",
-            "presentation_acked": "done",
-        }
-
-        # Aca-py : RFC
-        self.didExchangeResponderStateTranslationDict = {
-            "initial": "invitation-sent",
-            "invitation": "invitation-received",
-            "request": "request-received",
-            "response": "response-sent",
-            "?": "abandoned",
-            "active": "completed",
-            "completed": "completed",
-        }
-
-        # Aca-py : RFC
-        self.didExchangeRequesterStateTranslationDict = {
-            "initial": "invitation-sent",
-            "invitation": "invitation-received",
-            "request": "request-sent",
-            "response": "response-received",
-            "?": "abandoned",
-            "active": "completed",
-        }
+        self.invitations = dict()
 
     async def listen_webhooks(self, webhook_port):
         self.webhook_port = webhook_port
@@ -311,40 +228,6 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         print("Expected state", status_txt, "but received", state, ", with a response status of", resp_status)
         return False
 
-    async def make_admin_request(
-        self, method, path, data=None, text=False, params=None
-    ) -> (int, str):
-        params = {k: v for (k, v) in (params or {}).items() if v is not None}
-        async with self.client_session.request(
-            method, self.admin_url + path, json=data, params=params
-        ) as resp:
-            resp_status = resp.status
-            resp_text = await resp.text()
-            return (resp_status, resp_text)
-
-    async def admin_GET(self, path, text=False, params=None) -> Tuple[int, str]:
-        try:
-            return await self.make_admin_request("GET", path, None, text, params)
-        except ClientError as e:
-            self.log(f"Error during GET {path}: {str(e)}")
-            raise
-
-    async def admin_DELETE(self, path, text=False, params=None) -> Tuple[int, str]:
-        try:
-            return await self.make_admin_request("DELETE", path, None, text, params)
-        except ClientError as e:
-            self.log(f"Error during DELETE {path}: {str(e)}")
-            raise
-
-    async def admin_POST(
-        self, path, data=None, text=False, params=None
-    ) -> Tuple[int, str]:
-        try:
-            return await self.make_admin_request("POST", path, data, text, params)
-        except ClientError as e:
-            self.log(f"Error during POST {path}: {str(e)}")
-            raise
-
     async def make_agent_POST_request(
         self, op, rec_id=None, data=None, text=False, params=None
     ) -> Tuple[int, str]:
@@ -352,284 +235,47 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         if op["topic"] == "connection":
             operation = op["operation"]
             if operation == "create-invitation":
-                agent_operation = "/connections/" + operation
-
-                (resp_status, resp_text) = await self.admin_POST(agent_operation)
-
-                # extract invitation from the agent's response
-                invitation_resp = json.loads(resp_text)
-                resp_text = json.dumps(invitation_resp)
-
-                if resp_status == 200:
-                    resp_text = self.agent_state_translation(
-                        op["topic"], operation, resp_text
-                    )
-                return (resp_status, resp_text)
+                connection_key = await sirius_sdk.Crypto.create_key()
+                inviter_endpoint = [e for e in await sirius_sdk.endpoints() if e.routing_keys == []][0]
+                invitation = sirius_sdk.aries_rfc.Invitation(
+                    label='IndiLynx Agent',
+                    endpoint=inviter_endpoint.address,
+                    recipient_keys=[connection_key]
+                )
+                return 200, str({
+                    "connection_id": connection_key,
+                    "invitation": invitation
+                })
 
             elif operation == "receive-invitation":
-                agent_operation = "/connections/" + operation
+                invitation = sirius_sdk.aries_rfc.Invitation(**dict(data))
+                invitation.validate()
+                connection_id = str(uuid.uuid1())
+                self.invitations[connection_id] = invitation
+                return 200, str({
+                    "connection_id": connection_id,
+                    "state": "invitation"
+                })
 
-                (resp_status, resp_text) = await self.admin_POST(
-                    agent_operation, data=data
-                )
-                if resp_status == 200:
-                    resp_text = self.agent_state_translation(
-                        op["topic"], None, resp_text
-                    )
-                return (resp_status, resp_text)
-
-            elif (
-                operation == "accept-invitation"
-                or operation == "accept-request"
-                or operation == "remove"
-                or operation == "start-introduction"
-                or operation == "send-ping"
-            ):
+            elif operation == "accept-invitation":
                 connection_id = rec_id
-
-                # wait for the connection to be in "requested" status
-                if operation == "accept-request":
-                    # if self.auto_accept_requests:
-                    #     if not await self.expected_agent_state("/connections/" + connection_id, "response", wait_time=60.0):
-                    #         raise Exception(f"Expected state responded but not received")
-                    # else:
-                    if not self.auto_accept_requests:
-                        if not await self.expected_agent_state("/connections/" + connection_id, "request", wait_time=60.0):
-                            raise Exception(f"Expected state request but not received")
-
-                agent_operation = "/connections/" + connection_id + "/" + operation
-                log_msg("POST Request: ", agent_operation, data)
-
-                if self.auto_accept_requests and operation == "accept-request":
-                    resp_status = 200
-                    resp_text = 'Aca-py agent in auto accept request mode. accept-request operation not called.'
+                invitation = self.invitations[connection_id]
+                did, verkey = await sirius_sdk.DID.create_and_store_my_did()
+                me = sirius_sdk.Pairwise.Me(did, verkey)
+                my_endpoint = [e for e in await sirius_sdk.endpoints() if e.routing_keys == []][0]
+                invitee = sirius_sdk.aries_rfc.Invitee(me, my_endpoint)
+                ok, pairwise = await invitee.create_connection(invitation=invitation, my_label='IndiLynx Invitee')
+                if ok:
+                    del self.invitations[connection_id]
+                    return 200, str({
+                        "connection_id": connection_id,
+                        "state": "active"
+                    })
                 else:
-                    # As of adding the Auto Accept and Auto Respond support, it seems a sleep is required here,
-                    # or sometimes the agent isn't in the correct state to accept the operation. Not sure why...
-                    await asyncio.sleep(1)
-                    (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-                    if resp_status == 200: resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-                
-                log_msg(resp_status, resp_text)
-                return (resp_status, resp_text)
-
-        elif op["topic"] == "schema":
-            # POST operation is to create a new schema
-            agent_operation = "/schemas"
-            log_msg(agent_operation, data)
-
-            (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-
-            log_msg(resp_status, resp_text)
-            resp_text = self.move_field_to_top_level(resp_text, "schema_id")
-            return (resp_status, resp_text)
-
-        elif op["topic"] == "credential-definition":
-            # POST operation is to create a new cred def
-            agent_operation = "/credential-definitions"
-            log_msg(agent_operation, data)
-
-            (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-
-            log_msg(resp_status, resp_text)
-            resp_text = self.move_field_to_top_level(
-                resp_text, "credential_definition_id"
-            )
-            return (resp_status, resp_text)
-
-        elif op["topic"] == "issue-credential":
-            operation = op["operation"]
-
-            acapy_topic = "/issue-credential/"
-
-            if self.auto_respond_credential_proposal and operation == "send-offer" and rec_id:
-                resp_status = 200
-                resp_text = '{"message": "Aca-py agent in auto respond mode for proposal. send-offer operation not called."}'
-                return (resp_status, resp_text)
-            elif self.auto_respond_credential_offer and operation == "send-request":
-                resp_status = 200
-                resp_text = '{"message": "Aca-py agent in auto respond mode for offer. send-request operation not called."}'
-                return (resp_status, resp_text)
-            elif self.auto_respond_credential_request and operation == "issue":
-                resp_status = 200
-                resp_text = '{"message": "Aca-py agent in auto respond mode for request. issue operation not called."}'
-                return (resp_status, resp_text)
-            else:
-                if rec_id is None:
-                    agent_operation = acapy_topic + operation
-                else:
-                    if (
-                        operation == "send-offer"
-                        or operation == "send-request"
-                        or operation == "issue"
-                        or operation == "store"
-                    ):
-                    
-                        # swap thread id for cred ex id from the webhook
-                        cred_ex_id = await self.swap_thread_id_for_exchange_id(
-                            rec_id, "credential-msg", "credential_exchange_id"
-                        )
-                        agent_operation = (
-                            acapy_topic + "records/" + cred_ex_id + "/" + operation
-                        )
-
-                        # wait for the issue cred to be in "request-received" status
-                        if operation == "issue" and not self.auto_respond_credential_request:
-                                if not await self.expected_agent_state(acapy_topic + "records/" + cred_ex_id, "request_received", wait_time=60.0):
-                                    raise Exception(f"Expected state request-received but not received")
-
-                    # Make Special provisions for revoke since it is passing multiple query params not just one id.
-                    elif operation == "revoke":
-                        cred_rev_id = rec_id
-                        rev_reg_id = data["rev_registry_id"]
-                        publish = data["publish_immediately"]
-                        agent_operation = (
-                            acapy_topic
-                            + operation
-                            + "?cred_rev_id="
-                            + cred_rev_id
-                            + "&rev_reg_id="
-                            + rev_reg_id
-                            + "&publish="
-                            + str(publish).lower()
-                        )
-                        data = None
-                    else:
-                        agent_operation = acapy_topic + operation
-
-                log_msg(agent_operation, data)
-
-                # As of adding the Auto Accept and Auto Respond support and not taking time to check interim states
-                # it seems a sleep is required here,
-                # or sometimes the agent isn't in the correct state to accept the operation. Not sure why...
-                await asyncio.sleep(1)
-                (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-
-                log_msg(resp_status, resp_text)
-                if resp_status == 200 and self.aip_version != "AIP20":
-                    resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-                return (resp_status, resp_text)
-
-        # Handle issue credential v2 POST operations
-        elif op["topic"] == "issue-credential-v2":
-            (resp_status, resp_text) = await self.handle_issue_credential_v2_POST(
-                op, rec_id=rec_id, data=data
-            )
-            return (resp_status, resp_text)
-
-        # Handle proof v2 POST operations
-        elif op["topic"] == "proof-v2":
-            (resp_status, resp_text) = await self.handle_proof_v2_POST(
-                op, rec_id=rec_id, data=data
-            )
-            return (resp_status, resp_text)
-
-        elif op["topic"] == "revocation":
-            # set the acapyversion to master since work to set it is not complete. Remove when master report proper version
-            # self.acapy_version = "0.5.5-RC"
-            operation = op["operation"]
-            (
-                agent_operation,
-                admin_data,
-            ) = await self.get_agent_operation_acapy_version_based(
-                op["topic"], operation, rec_id, data
-            )
-
-            log_msg(agent_operation, admin_data)
-
-            if admin_data is None:
-                (resp_status, resp_text) = await self.admin_POST(agent_operation)
-            else:
-                (resp_status, resp_text) = await self.admin_POST(
-                    agent_operation, admin_data
-                )
-
-            log_msg(resp_status, resp_text)
-            if resp_status == 200:
-                resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-            return (resp_status, resp_text)
-
-        elif op["topic"] == "proof":
-            operation = op["operation"]
-            if operation == "create-send-connectionless-request":
-                operation = "create-request"
-
-            if self.auto_respond_presentation_proposal and operation == "send-request" and rec_id:
-                resp_status = 200
-                resp_text = '{"message": "Aca-py agent in auto respond mode for presentation proposal. send-request operation not called."}'
-                log_msg("Aca-py agent in auto respond mode for presentation proposal. send-request operation not called.")
-                return (resp_status, resp_text)
-            elif self.auto_respond_presentation_request and operation == "send-presentation":
-                resp_status = 200
-                resp_text = '{"message": "Aca-py agent in auto respond mode for presentation request. send-presentation operation not called."}'
-                log_msg("Aca-py agent in auto respond mode for presentation request. send-presentation operation not called.")
-                return (resp_status, resp_text)
-            else:
-                if rec_id is None:
-                    agent_operation = "/present-proof/" + operation
-                else:
-                    if (
-                        operation == "send-presentation"
-                        or operation == "send-request"
-                        or operation == "verify-presentation"
-                        or operation == "remove"
-                    ):
-
-                        if (
-                            operation not in "send-presentation"
-                            or operation not in "send-request"
-                        ) and (data is None or "~service" not in data):
-                            # swap thread id for pres ex id from the webhook
-                            pres_ex_id = await self.swap_thread_id_for_exchange_id(
-                                rec_id, "presentation-msg", "presentation_exchange_id"
-                            )
-                        else:
-                            # swap the thread id for the pres ex id in the service decorator (this is a connectionless proof)
-                            pres_ex_id = data["~service"]["recipientKeys"][0]
-                        agent_operation = (
-                            "/present-proof/records/" + pres_ex_id + "/" + operation
-                        )
-
-                         # wait for the proof to be in "presentation-received" status
-                        if operation == "verify-presentation" and not self.auto_respond_presentation_request:
-                            if not await self.expected_agent_state("/present-proof/records/" + pres_ex_id, "presentation_received", wait_time=60.0):
-                                raise Exception(f"Expected state presentation-received but not received")
-
-                    else:
-                        agent_operation = "/present-proof/" + operation
-
-                log_msg(agent_operation, data)
-
-                if data is not None:
-                    # Format the message data that came from the test, to what the Aca-py admin api expects.
-                    data = self.map_test_json_to_admin_api_json(
-                        op["topic"], operation, data
-                    )
-
-                # As of adding the Auto Accept and Auto Respond support and not taking time to check interim states
-                # it seems a sleep is required here,
-                # or sometimes the agent isn't in the correct state to accept the operation. Not sure why...
-                await asyncio.sleep(1)
-                (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-
-                log_msg(resp_status, resp_text)
-                if resp_status == 200:
-                    resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-                return (resp_status, resp_text)
-
-        # Handle out of band POST operations
-        elif op["topic"] == "out-of-band":
-            (resp_status, resp_text) = await self.handle_out_of_band_POST(op, data=data)
-            return (resp_status, resp_text)
-
-        # Handle did exchange POST operations
-        elif op["topic"] == "did-exchange":
-            (resp_status, resp_text) = await self.handle_did_exchange_POST(
-                op, rec_id=rec_id, data=data
-            )
-            return (resp_status, resp_text)
-
-        return (501, "501: Not Implemented\n\n".encode("utf8"))
+                    return 200, str({
+                        "connection_id": connection_id,
+                        "state": "request"
+                    })
 
     async def handle_out_of_band_POST(self, op, rec_id=None, data=None):
         operation = op["operation"]
@@ -828,72 +474,6 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             # if resp_status == 200: resp_text = self.agent_state_translation(topic], None, resp_text)
             resp_text = self.move_field_to_top_level(resp_text, "state")
             return (resp_status, resp_text)
-
-    async def handle_proof_v2_POST(self, op, rec_id=None, data=None):
-        operation = op["operation"]
-        topic = op["topic"]
-
-        if self.auto_respond_presentation_proposal and operation == "send-request" and rec_id:
-            resp_status = 200
-            resp_text = '{"message": "Aca-py agent in auto respond mode for presentation proposal. send-request operation not called."}'
-            log_msg("Aca-py agent in auto respond mode for presentation proposal. send-request operation not called.")
-            return (resp_status, resp_text)
-        elif self.auto_respond_presentation_request and operation == "send-presentation":
-            resp_status = 200
-            resp_text = '{"message": "Aca-py agent in auto respond mode for presentation request. send-presentation operation not called."}'
-            log_msg("Aca-py agent in auto respond mode for presentation request. send-presentation operation not called.")
-            return (resp_status, resp_text)
-        else:
-            if rec_id is None:
-                agent_operation = (
-                    self.TopicTranslationDict[topic]
-                    + self.proofv2OperationTranslationDict[operation]
-                )
-            else:
-                # swap thread id for cred ex id from the webhook
-                pres_ex_id = await self.swap_thread_id_for_exchange_id(
-                    rec_id, "presentation-msg", "pres_ex_id"
-                )
-                agent_operation = (
-                    self.TopicTranslationDict[topic]
-                    + "records/"
-                    + pres_ex_id
-                    + "/"
-                    + self.proofv2OperationTranslationDict[operation]
-                )
-
-            log_msg(
-                f"Data passed to backchannel by test for operation: {agent_operation}", data
-            )
-            if data is not None:
-                # Format the message data that came from the test, to what the Aca-py admin api expects.
-                data = self.map_test_json_to_admin_api_json("proof-v2", operation, data)
-            log_msg(
-                f"Data translated by backchannel to send to agent for operation: {agent_operation}",
-                data,
-            )
-            await asyncio.sleep(1)
-            (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-
-            log_msg(resp_status, resp_text)
-            resp_text = self.move_field_to_top_level(resp_text, "state")
-            return (resp_status, resp_text)
-
-    def move_field_to_top_level(self, resp_text, field_to_move):
-        # Some reponses have been changed to nest fields that were once at top level.
-        # The Test harness expects the these fields to be at the root. Other agents have it at the root.
-        # This could be removed if it is common acorss agents to nest these fields in `sent:` for instance.
-        resp_json = json.loads(resp_text)
-        if field_to_move in resp_json:
-            # If it is already a top level field, forget about it.
-            return resp_text
-        else:
-            # Find the field and put a copy as a top level
-            for key in resp_json:
-                if field_to_move in resp_json[key]:
-                    field_value = resp_json[key][field_to_move]
-                    resp_json[field_to_move] = field_value
-                    return json.dumps(resp_json)
 
     async def make_agent_GET_request(
         self, op, rec_id=None, text=False, params=None
@@ -1384,430 +964,6 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         if self.webhook_site:
             await self.webhook_site.stop()
 
-    def map_test_json_to_admin_api_json(self, topic, operation, data):
-        # If the translation of the json get complicated in the future we might want to consider a switch to JsonMapper or equivalent.
-        # json_mapper = JsonMapper()
-        # map_specification = {
-        #     'name': ['person_name']
-        # }
-        # JsonMapper(test_json).map(map_specification)
-
-        if topic == "proof":
-
-            if operation == "send-request" or operation == "create-request":
-                request_type = "proof_request"
-
-                if (
-                    data.get("presentation_request", {})
-                    .get(request_type, {})
-                    .get("data", {})
-                    .get("requested_attributes")
-                    is None
-                ):
-                    requested_attributes = {}
-                else:
-                    requested_attributes = data["presentation_request"][request_type][
-                        "data"
-                    ]["requested_attributes"]
-
-                if (
-                    data.get("presentation_request", {})
-                    .get(request_type, {})
-                    .get("data", {})
-                    .get("requested_predicates")
-                    is None
-                ):
-                    requested_predicates = {}
-                else:
-                    requested_predicates = data["presentation_request"][request_type][
-                        "data"
-                    ]["requested_predicates"]
-
-                if (
-                    data.get("presentation_request", {})
-                    .get(request_type, {})
-                    .get("data", {})
-                    .get("name")
-                    is None
-                ):
-                    proof_request_name = "test proof"
-                else:
-                    proof_request_name = data["presentation_request"][request_type][
-                        "data"
-                    ]["name"]
-
-                if (
-                    data.get("presentation_request", {})
-                    .get(request_type, {})
-                    .get("data", {})
-                    .get("version")
-                    is None
-                ):
-                    proof_request_version = "1.0"
-                else:
-                    proof_request_version = data["presentation_request"][request_type][
-                        "data"
-                    ]["version"]
-
-                if (
-                    data.get("presentation_request", {})
-                    .get(request_type, {})
-                    .get("data", {})
-                    .get("non_revoked")
-                    is None
-                ):
-                    non_revoked = None
-                else:
-                    non_revoked = data["presentation_request"][request_type]["data"][
-                        "non_revoked"
-                    ]
-
-                if "connection_id" in data:
-                    admin_data = {
-                        "comment": data["presentation_request"]["comment"],
-                        "trace": False,
-                        "connection_id": data["connection_id"],
-                        request_type: {
-                            "name": proof_request_name,
-                            "version": proof_request_version,
-                            "requested_attributes": requested_attributes,
-                            "requested_predicates": requested_predicates,
-                        },
-                    }
-                else:
-                    admin_data = {
-                        "comment": data["presentation_request"]["comment"],
-                        "trace": False,
-                        request_type: {
-                            "name": proof_request_name,
-                            "version": proof_request_version,
-                            "requested_attributes": requested_attributes,
-                            "requested_predicates": requested_predicates,
-                        },
-                    }
-                if non_revoked is not None:
-                    admin_data[request_type]["non_revoked"] = non_revoked
-
-            # Make special provisions for proposal. The names are changed in this operation. Should be consistent imo.
-            # this whole condition can be removed for V2.0 of the protocol. It will look like more of a send-request in 2.0.
-            elif operation == "send-proposal":
-
-                request_type = "presentation_proposal"
-
-                if (
-                    data.get("presentation_proposal", {}).get("attributes")
-                    == None
-                ):
-                    attributes = []
-                else:
-                    attributes = data["presentation_proposal"][
-                        "attributes"
-                    ]
-
-                if (
-                    data.get("presentation_proposal", {}).get("predicates")
-                    == None
-                ):
-                    predicates = []
-                else:
-                    predicates = data["presentation_proposal"][
-                        "predicates"
-                    ]
-
-                admin_data = {
-                    "comment": data["presentation_proposal"]["comment"],
-                    "trace": False,
-                    request_type: {
-                        "attributes": attributes,
-                        "predicates": predicates,
-                    },
-                }
-
-                if "connection_id" in data:
-                    admin_data["connection_id"] = data["connection_id"]
-
-            elif operation == "send-presentation":
-
-                if data.get("requested_attributes") == None:
-                    requested_attributes = {}
-                else:
-                    requested_attributes = data["requested_attributes"]
-
-                if data.get("requested_predicates") == None:
-                    requested_predicates = {}
-                else:
-                    requested_predicates = data["requested_predicates"]
-
-                if data.get("self_attested_attributes") == None:
-                    self_attested_attributes = {}
-                else:
-                    self_attested_attributes = data["self_attested_attributes"]
-
-                admin_data = {
-                    "comment": data["comment"],
-                    "requested_attributes": requested_attributes,
-                    "requested_predicates": requested_predicates,
-                    "self_attested_attributes": self_attested_attributes,
-                }
-
-            else:
-                admin_data = data
-
-            # Add on the service decorator if it exists.
-            if "~service" in data:
-                admin_data["~service"] = data["~service"]
-
-            return admin_data
-
-        if topic == "proof-v2":
-
-            if operation == "send-request":
-                request_type = "presentation_request"
-
-                presentation_request_orig = data.get("presentation_request", {})
-                pres_request_data = presentation_request_orig.get("data", {})
-                cred_format = presentation_request_orig.get("format")
-
-                if cred_format is None:
-                    raise Exception("Credential format not specified for presentation")
-                elif cred_format == "indy":
-                    requested_attributes = pres_request_data.get(
-                        "requested_attributes", {}
-                    )
-                    requested_predicates = pres_request_data.get(
-                        "requested_predicates", {}
-                    )
-                    proof_request_name = pres_request_data.get("name", "test proof")
-                    proof_request_version = pres_request_data.get("version", "1.0")
-                    non_revoked = pres_request_data.get("non_revoked")
-
-                    presentation_request = {
-                        cred_format: {
-                            "name": proof_request_name,
-                            "version": proof_request_version,
-                            "requested_attributes": requested_attributes,
-                            "requested_predicates": requested_predicates,
-                        }
-                    }
-
-                    if non_revoked is not None:
-                        presentation_request[cred_format]["non_revoked"] = non_revoked
-
-                elif cred_format == "json-ld":
-                    # We use DIF format for JSON-LD credentials
-                    presentation_request = {"dif": pres_request_data}
-                else:
-                    raise Exception(f"Unknown credential format: {cred_format}")
-
-                admin_data = {
-                    "comment": presentation_request_orig["comment"],
-                    "trace": False,
-                    request_type: presentation_request,
-                }
-
-                if "connection_id" in presentation_request_orig:
-                    admin_data["connection_id"] = presentation_request_orig["connection_id"]
-
-            elif operation == "send-presentation":
-
-                cred_format = data.get("format")
-
-                if cred_format is None:
-                    raise Exception("Credential format not specified for presentation")
-                elif cred_format == "indy":
-                    requested_attributes = data.get("requested_attributes", {})
-                    requested_predicates = data.get("requested_predicates", {})
-                    self_attested_attributes = data.get("self_attested_attributes", {})
-
-                    presentation_data = {
-                        cred_format: {
-                            "requested_attributes": requested_attributes,
-                            "requested_predicates": requested_predicates,
-                            "self_attested_attributes": self_attested_attributes,
-                        }
-                    }
-                elif cred_format == "json-ld":
-                    presentation = data.copy()
-                    presentation.pop("format")
-
-                    presentation_data = {"dif": presentation}
-
-                else:
-                    raise Exception(f"Unknown credential format: {cred_format}")
-
-                admin_data = {
-                    **presentation_data,
-                    "comment": data.get("comment", "some comment"),
-                }
-
-            else:
-                admin_data = data
-
-            # Add on the service decorator if it exists.
-            if "~service" in data:
-                admin_data["~service"] = data["~service"]
-
-            return admin_data
-
-    def agent_state_translation(self, topic, operation, data):
-        # This method is used to translate the agent states passes back in the responses of operations into the states the
-        # test harness expects. The test harness expects states to be as they are written in the Protocol's RFC.
-        # the following is what the tests/rfc expect vs what aca-py communicates
-        # Connection Protocol:
-        # Tests/RFC         |   Aca-py
-        # invited           |   invitation
-        # requested         |   request
-        # responded         |   response
-        # complete          |   active
-        #
-        # Issue Credential Protocol:
-        # Tests/RFC         |   Aca-py
-        # proposal-sent     |   proposal_sent
-        # proposal-received |   proposal_received
-        # offer-sent        |   offer_sent
-        # offer_received    |   offer_received
-        # request-sent      |   request_sent
-        # request-received  |   request_received
-        # credential-issued |   issued
-        # credential-received | credential_received
-        # done              |   credential_acked
-        #
-        # Present Proof Protocol:
-        # Tests/RFC         |   Aca-py
-
-        resp_json = json.loads(data)
-        # Check to see if state is in the json
-        if "state" in resp_json:
-            agent_state = resp_json["state"]
-
-            # if "did_exchange" in topic:
-            #     if "rfc23_state" in resp_json:
-            #         rfc_state = resp_json["rfc23_state"]
-            #     else:
-            #         rfc_state = resp_json["connection"]["rfc23_state"]
-            #     data = data.replace('"state"' + ": " + '"' + agent_state + '"', '"state"' + ": " + '"' + rfc_state + '"')
-            # else:
-            # Check the thier_role property in the data and set the calling method to swap states to the correct role for DID Exchange
-            if "their_role" in data:
-                # if resp_json["connection"]["their_role"] == "invitee":
-                if "invitee" in data:
-                    de_state_trans_method = (
-                        self.didExchangeResponderStateTranslationDict
-                    )
-                elif "inviter" in data:
-                    de_state_trans_method = (
-                        self.didExchangeRequesterStateTranslationDict
-                    )
-            else:
-                # make the trans method any one, since it doesn't matter. It's probably Out of Band.
-                de_state_trans_method = self.didExchangeResponderStateTranslationDict
-
-            if topic == "connection":
-                # if the response contains didexchange/1.0, swap out the connection states for the did exchange states
-                # if "didexchange/1.0" in resp_json["connection_protocol"]:
-                if "didexchange/1.0" in data:
-                    data = data.replace(
-                        '"state"' + ": " + '"' + agent_state + '"',
-                        '"state"'
-                        + ": "
-                        + '"'
-                        + de_state_trans_method[agent_state]
-                        + '"',
-                    )
-                else:
-                    data = data.replace(
-                        agent_state, self.connectionStateTranslationDict[agent_state]
-                    )
-            elif topic == "issue-credential":
-                data = data.replace(
-                    agent_state, self.issueCredentialStateTranslationDict[agent_state]
-                )
-            elif topic == "proof":
-                data = data.replace(
-                    '"state"' + ": " + '"' + agent_state + '"',
-                    '"state"'
-                    + ": "
-                    + '"'
-                    + self.presentProofStateTranslationDict[agent_state]
-                    + '"',
-                )
-            elif topic == "out-of-band":
-                data = data.replace(
-                    '"state"' + ": " + '"' + agent_state + '"',
-                    '"state"' + ": " + '"' + de_state_trans_method[agent_state] + '"',
-                )
-            elif topic == "did-exchange":
-                data = data.replace(
-                    '"state"' + ": " + '"' + agent_state + '"',
-                    '"state"' + ": " + '"' + de_state_trans_method[agent_state] + '"',
-                )
-        return data
-
-    async def get_agent_operation_acapy_version_based(
-        self, topic, operation, rec_id=None, data=None
-    ):
-        # Admin api calls may change with acapy releases. For example revocation related calls change
-        # between 0.5.4 and 0.5.5. To be able to handle this the backchannel is made aware of the acapy version
-        # and constructs the calls based off that version
-
-        # construct some number to compare to with > or < instead of listing out the version number
-        comparibleVersion = self.get_acapy_version_as_float()
-
-        if topic == "revocation":
-            if operation == "revoke":
-                if comparibleVersion > 54:
-                    agent_operation = "/revocation/" + operation
-                    if "cred_ex_id" in data:
-                        admindata = {
-                            "cred_ex_ed": data["cred_ex_id"],
-                        }
-                    else:
-                        admindata = {
-                            "cred_rev_id": data["cred_rev_id"],
-                            "rev_reg_id": data["rev_registry_id"],
-                            "publish": str(data["publish_immediately"]).lower(),
-                        }
-                    data = admindata
-                else:
-                    agent_operation = "/issue-credential/" + operation
-
-                    if (
-                        data is not None
-                    ):  # Data should be included with 0.5.4 or lower acapy. Then it takes them as inline parameters.
-                        cred_rev_id = data["cred_rev_id"]
-                        rev_reg_id = data["rev_registry_id"]
-                        publish = data["publish_immediately"]
-                        agent_operation = (
-                            agent_operation
-                            + "?cred_rev_id="
-                            + cred_rev_id
-                            + "&rev_reg_id="
-                            + rev_reg_id
-                            + "&publish="
-                            + rev_reg_id
-                            + str(publish).lower()
-                        )
-                        data = None
-            elif operation == "credential-record":
-                agent_operation = "/revocation/" + operation
-                if "cred_ex_id" in data:
-                    cred_ex_id = data["cred_ex_id"]
-                    agent_operation = agent_operation + "?cred_ex_id=" + cred_ex_id
-                else:
-                    cred_rev_id = data["cred_rev_id"]
-                    rev_reg_id = data["rev_registry_id"]
-                    agent_operation = (
-                        agent_operation
-                        + "?cred_rev_id="
-                        + cred_rev_id
-                        + "&rev_reg_id="
-                        + rev_reg_id
-                    )
-                    data = None
-        # elif (topic == "credential"):
-
-        return agent_operation, data
-
 
 async def main(start_port: int, show_timing: bool = False, interactive: bool = True):
 
@@ -1825,8 +981,8 @@ async def main(start_port: int, show_timing: bool = False, interactive: bool = T
     agent = None
 
     try:
-        agent = AcaPyAgentBackchannel(
-            "aca-py." + AGENT_NAME,
+        agent = IndiLynxCloudAgentBackchannel(
+            "indiLynx." + AGENT_NAME,
             start_port + 1,
             start_port + 2,
             genesis_data=genesis,
