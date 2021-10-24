@@ -20,7 +20,7 @@ async def http_get(url: str):
 
 
 async def get_agent_params(agent_name: str):
-    ok, meta = await http_get("http://localhost/test_suite")
+    ok, meta = await http_get("http://10.0.0.90/test_suite")
     print(meta)
     agent = meta.get(agent_name, None)
     if not agent:

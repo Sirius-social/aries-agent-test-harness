@@ -862,10 +862,6 @@ async def main(start_port: int, show_timing: bool = False, interactive: bool = T
     agent = None
 
     try:
-
-        gov_agent_params = await get_agent_params("agent1")
-        sirius_sdk.init(**gov_agent_params)
-
         agent = IndiLynxCloudAgentBackchannel(
             "indiLynx." + AGENT_NAME,
             start_port + 1,
@@ -941,6 +937,9 @@ if __name__ == "__main__":
         help="Start agent interactively",
     )
     args = parser.parse_args()
+
+    gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params("agent1"))
+    sirius_sdk.init(**gov_agent_params)
 
     try:
         asyncio.get_event_loop().run_until_complete(
