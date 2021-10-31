@@ -938,8 +938,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params("agent1"))
-    sirius_sdk.init(**gov_agent_params)
+    #gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params("agent1"))
+    #sirius_sdk.init(**gov_agent_params)
 
     try:
         asyncio.get_event_loop().run_until_complete(
