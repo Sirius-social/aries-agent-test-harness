@@ -243,7 +243,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                     endpoint=inviter_endpoint.address,
                     recipient_keys=[connection_key]
                 )
-                return 200, str({
+                return 200, json.dumps({
                     "connection_id": connection_key,
                     "invitation": invitation
                 })
@@ -253,7 +253,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 invitation.validate()
                 connection_id = str(uuid.uuid1())
                 self.invitations[connection_id] = invitation
-                return 200, str({
+                return 200, json.dumps({
                     "connection_id": connection_id,
                     "state": "invitation"
                 })
@@ -268,12 +268,12 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 ok, pairwise = await invitee.create_connection(invitation=invitation, my_label='IndiLynx Invitee')
                 if ok:
                     del self.invitations[connection_id]
-                    return 200, str({
+                    return 200, json.dumps({
                         "connection_id": connection_id,
                         "state": "active"
                     })
                 else:
-                    return 200, str({
+                    return 200, json.dumps({
                         "connection_id": connection_id,
                         "state": "request"
                     })
@@ -881,6 +881,8 @@ async def main(start_port: int, show_timing: bool = False, interactive: bool = T
         agent.activate()
 
         # now wait ...
+        interactive = False
+        print(interactive)
         if interactive:
             async for option in prompt_loop("(X) Exit? [X] "):
                 if option is None or option in "xX":
@@ -938,8 +940,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    #gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params("agent1"))
-    #sirius_sdk.init(**gov_agent_params)
+    gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params("agent1"))
+    sirius_sdk.init(**gov_agent_params)
 
     try:
         asyncio.get_event_loop().run_until_complete(
