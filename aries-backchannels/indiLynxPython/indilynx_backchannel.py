@@ -1,30 +1,21 @@
 import asyncio
-import functools
 import json
 import logging
 import os
-import subprocess
-import sys
 import uuid
 
-from timeit import default_timer
 from typing import Tuple
 
 from aiohttp import (
     web,
-    ClientSession,
     ClientRequest,
-    ClientError,
-    ClientTimeout,
 )
 
 from python.agent_backchannel import (
     AgentBackchannel,
-    default_genesis_txns,
     RUN_MODE,
-    START_TIMEOUT,
 )
-from python.utils import flatten, log_msg, output_reader, prompt_loop
+from python.utils import log_msg, prompt_loop
 from python.storage import (
     get_resource,
     push_resource,
@@ -34,7 +25,7 @@ from python.storage import (
 import sirius_sdk
 from helpers import get_agent_params
 
-# from helpers.jsonmapper.json_mapper import JsonMapper
+from enum import Enum
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +51,27 @@ elif RUN_MODE == "pwd":
     DEFAULT_PYTHON_PATH = "."
 
 
+class IndiLynxConnection:
+
+    class State(Enum):
+        invited = 0,
+        requested = 1,
+        responded = 2,
+        complete = 3
+
+    def __init__(self, connection_id: str, invitation: sirius_sdk.aries_rfc.Invitation = None):
+        self.connection_id = connection_id
+        self.state = IndiLynxConnection.State.invited
+        self.invitation = invitation
+        self.pairwise = None
+
+    def to_json(self):
+        return json.dumps({
+            "connection_id": self.connection_id,
+            "state": self.state.name
+        })
+
+
 class IndiLynxCloudAgentBackchannel(AgentBackchannel):
     def __init__(
         self,
@@ -81,7 +93,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         self.auto_respond_presentation_proposal = False
         self.auto_respond_presentation_request = False
 
-        self.invitations = dict()
+        self.connections = dict()
 
     async def listen_webhooks(self, webhook_port):
         self.webhook_port = webhook_port
@@ -252,7 +264,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 invitation = sirius_sdk.aries_rfc.Invitation(**dict(data))
                 invitation.validate()
                 connection_id = str(uuid.uuid1())
-                self.invitations[connection_id] = invitation
+                self.connections[connection_id] = IndiLynxConnection(connection_id=connection_id, invitation=invitation)
                 return 200, json.dumps({
                     "connection_id": connection_id,
                     "state": "invitation"
@@ -260,23 +272,42 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
 
             elif operation == "accept-invitation":
                 connection_id = rec_id
-                invitation = self.invitations[connection_id]
+                invitation = self.connections[connection_id].invitation
                 did, verkey = await sirius_sdk.DID.create_and_store_my_did()
                 me = sirius_sdk.Pairwise.Me(did, verkey)
                 my_endpoint = [e for e in await sirius_sdk.endpoints() if e.routing_keys == []][0]
                 invitee = sirius_sdk.aries_rfc.Invitee(me, my_endpoint)
                 ok, pairwise = await invitee.create_connection(invitation=invitation, my_label='IndiLynx Invitee')
                 if ok:
-                    del self.invitations[connection_id]
+                    self.connections[connection_id].pairwise = pairwise
                     return 200, json.dumps({
                         "connection_id": connection_id,
                         "state": "active"
                     })
                 else:
-                    return 200, json.dumps({
-                        "connection_id": connection_id,
-                        "state": "request"
-                    })
+                    return 500, str(invitee.problem_report)
+
+        elif op["topic"] == "schema":
+            json_data = json.loads(data)
+            schema_name = json_data["schema_name"]
+            schema_version = json_data["schema_version"]
+            attributes = json_data["attributes"]
+            schema_id, anoncred_schema = await sirius_sdk.AnonCreds.issuer_create_schema(issuer_did=self.did,
+                                                            name=schema_name,
+                                                            version=schema_version,
+                                                            attrs=attributes)
+            return 200, json.dumps({
+                "schema_id": schema_id,
+                "schema": anoncred_schema
+            })
+
+        elif op["topic"] == "credential-definition":
+            json_data = json.loads(data)
+            support_revocation = json_data["support_revocation"]
+            schema_id = json_data["schema_id"]
+            tag = json_data["tag"]
+
+            return 500, "Not implemented"
 
     async def handle_out_of_band_POST(self, op, rec_id=None, data=None):
         operation = op["operation"]
@@ -483,69 +514,27 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         if op["topic"] == "status":
             status = 200 if self.ACTIVE else 418
             status_msg = "Active" if self.ACTIVE else "Inactive"
-            return (status, json.dumps({"status": status_msg}))
+            return status, json.dumps({"status": status_msg})
 
         if op["topic"] == "version":
-            if self.acapy_version is not None:
-                status = 200
-                # status_msg = json.dumps({"version": self.acapy_version})
-                status_msg = self.acapy_version
-            else:
-                status = 404
-                # status_msg = json.dumps({"version": "not found"})
-                status_msg = "not found"
-            return (status, status_msg)
+            return 200, "1.0"
 
         elif op["topic"] == "connection":
             if rec_id:
                 connection_id = rec_id
-                agent_operation = "/connections/" + connection_id
+                if connection_id in self.connections:
+                    return 200, self.connections[connection_id].to_json()
+                else:
+                    return 500, rec_id + " not recognized"
             else:
-                agent_operation = "/connections"
+                res = []
+                for connection_id in self.connections:
+                    res.append(self.connections[connection_id].to_json)
 
-            log_msg("GET Request agent operation: ", agent_operation)
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status != 200:
-                return (resp_status, resp_text)
-
-            log_msg("GET Request response details: ", resp_status, resp_text)
-
-            resp_json = json.loads(resp_text)
-            if rec_id:
-                connection_info = {
-                    "connection_id": resp_json["connection_id"],
-                    "state": resp_json["state"],
-                    "connection": resp_json,
-                }
-                resp_text = json.dumps(connection_info)
-            else:
-                resp_json = resp_json["results"]
-                connection_infos = []
-                for connection in resp_json:
-                    connection_info = {
-                        "connection_id": connection["connection_id"],
-                        "state": connection["state"],
-                        "connection": connection,
-                    }
-                    connection_infos.append(connection_info)
-                resp_text = json.dumps(connection_infos)
-            # translate the state from that the agent gave to what the tests expect
-            resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-            return (resp_status, resp_text)
+                return 200, str(res)
 
         elif op["topic"] == "did":
-            agent_operation = "/wallet/did/public"
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status != 200:
-                return (resp_status, resp_text)
-
-            resp_json = json.loads(resp_text)
-            did = resp_json["result"]
-
-            resp_text = json.dumps(did)
-            return (resp_status, resp_text)
+            return 500, "Not implemented"
 
         elif op["topic"] == "active-connection" and rec_id:
             agent_operation = f"/connections?their_did={rec_id}"
@@ -565,31 +554,15 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
 
         elif op["topic"] == "schema":
             schema_id = rec_id
-            agent_operation = "/schemas/" + schema_id
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status != 200:
-                return (resp_status, resp_text)
-
-            resp_json = json.loads(resp_text)
-            schema = resp_json["schema"]
-
-            resp_text = json.dumps(schema)
-            return (resp_status, resp_text)
+            dkms = await sirius_sdk.ledger(self.DKMS_NAME)
+            schema = await dkms.load_schema(schema_id, self.public_did)
+            return 200, json.dumps(schema)
 
         elif op["topic"] == "credential-definition":
             cred_def_id = rec_id
-            agent_operation = "/credential-definitions/" + cred_def_id
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status != 200:
-                return (resp_status, resp_text)
-
-            resp_json = json.loads(resp_text)
-            credential_definition = resp_json["credential_definition"]
-
-            resp_text = json.dumps(credential_definition)
-            return (resp_status, resp_text)
+            dkms = await sirius_sdk.ledger(self.DKMS_NAME)
+            cred_defs = await dkms.fetch_cred_defs(id_=cred_def_id)
+            return 200, json.dumps(cred_defs)
 
         elif op["topic"] == "issue-credential":
             # swap thread id for cred ex id from the webhook
