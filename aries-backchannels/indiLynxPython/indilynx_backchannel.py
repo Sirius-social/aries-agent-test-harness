@@ -52,6 +52,12 @@ elif RUN_MODE == "pwd":
     DEFAULT_PYTHON_PATH = "."
 
 
+class Logger:
+
+    async def __call__(self, *args, **kwargs):
+        log_msg(str(dict(**kwargs)))
+
+
 class IndiLynxConnection:
 
     class State(Enum):
@@ -74,6 +80,7 @@ class IndiLynxConnection:
 
 
 class IndiLynxCloudAgentBackchannel(AgentBackchannel):
+
     def __init__(
         self,
         ident: str,
@@ -95,6 +102,29 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         self.auto_respond_presentation_request = False
 
         self.connections = dict()
+
+    async def start_listener(self):
+        listener = await sirius_sdk.subscribe()
+        print("Listening")
+        async for event in listener:
+            request = event['message']
+            if isinstance(request, sirius_sdk.aries_rfc.ConnRequest):
+                log_msg("received: " + str(request))
+                my_did, my_verkey = await sirius_sdk.DID.create_and_store_my_did()
+                me = sirius_sdk.Pairwise.Me(did=my_did, verkey=my_verkey)
+                connection_key = event['recipient_verkey']
+                my_endpoint = [e for e in await sirius_sdk.endpoints() if e.routing_keys == []][0]
+                inviter_machine = sirius_sdk.aries_rfc.Inviter(
+                    me=me,
+                    connection_key=connection_key,
+                    my_endpoint=my_endpoint,
+                    logger=Logger()
+                )
+                ok, pairwise = await inviter_machine.create_connection(request)
+                if ok:
+                    await sirius_sdk.PairwiseList.ensure_exists(pairwise)
+                    self.connections[connection_key].pairwise = pairwise
+                    self.connections[connection_key].state = IndiLynxConnection.State.complete
 
     async def listen_webhooks(self, webhook_port):
         self.webhook_port = webhook_port
@@ -256,6 +286,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                     endpoint=inviter_endpoint.address,
                     recipient_keys=[connection_key]
                 )
+                self.connections[connection_key] = IndiLynxConnection(connection_id=connection_key, invitation=invitation)
                 return 200, json.dumps({
                     "connection_id": connection_key,
                     "invitation": invitation
@@ -263,6 +294,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
 
             elif operation == "receive-invitation":
                 invitation = sirius_sdk.aries_rfc.Invitation(**dict(data))
+                log_msg("received: " + str(invitation))
                 invitation.validate()
                 connection_id = str(uuid.uuid1())
                 self.connections[connection_id] = IndiLynxConnection(connection_id=connection_id, invitation=invitation)
@@ -277,16 +309,30 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 did, verkey = await sirius_sdk.DID.create_and_store_my_did()
                 me = sirius_sdk.Pairwise.Me(did, verkey)
                 my_endpoint = [e for e in await sirius_sdk.endpoints() if e.routing_keys == []][0]
-                invitee = sirius_sdk.aries_rfc.Invitee(me, my_endpoint)
+                invitee = sirius_sdk.aries_rfc.Invitee(
+                    me=me,
+                    my_endpoint=my_endpoint,
+                    logger=Logger()
+                )
                 ok, pairwise = await invitee.create_connection(invitation=invitation, my_label='IndiLynx Invitee')
                 if ok:
                     self.connections[connection_id].pairwise = pairwise
+                    self.connections[connection_id].state = IndiLynxConnection.State.complete
                     return 200, json.dumps({
                         "connection_id": connection_id,
                         "state": "active"
                     })
                 else:
                     return 500, str(invitee.problem_report)
+            elif operation == "accept-request":
+                return 200, ""
+            elif operation == "send-ping":
+                connection_id = rec_id
+                await asyncio.sleep(1)
+                return 200, json.dumps({
+                    "connection_id": connection_id,
+                    "state": "active"
+                })
 
         elif op["topic"] == "schema":
             json_data = json.loads(data)
@@ -881,7 +927,7 @@ async def main(start_port: int, show_timing: bool = False, interactive: bool = T
         await agent.listen_webhooks(start_port + 3)
         #await agent.register_did()
 
-        #await agent.start_process()
+        asyncio.get_event_loop().create_task(agent.start_listener())
         agent.activate()
 
         # now wait ...
@@ -944,7 +990,18 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params("agent1"))
+    if "acme" in AGENT_NAME.lower():
+        test_agent_name = "agent1"
+    elif "bob" in AGENT_NAME.lower():
+        test_agent_name = "agent2"
+    elif "faber" in AGENT_NAME.lower():
+        test_agent_name = "agent3"
+    elif "mallory" in AGENT_NAME.lower():
+        test_agent_name = "agent4"
+    else:
+        test_agent_name = "agent1"
+
+    gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params(test_agent_name))
     sirius_sdk.init(**gov_agent_params)
 
     try:
