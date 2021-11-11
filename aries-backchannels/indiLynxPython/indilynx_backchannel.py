@@ -23,6 +23,7 @@ from python.storage import (
     pop_resource_latest,
 )
 import sirius_sdk
+from sirius_sdk.messaging import restore_message_instance
 from helpers import get_agent_params
 
 from enum import Enum
@@ -308,6 +309,36 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             tag = json_data["tag"]
 
             return 500, "Not implemented"
+
+        elif op["topic"] == "issue-credential":
+            operation = op["operation"]
+            if operation == "send-proposal":
+                json_data = json.loads(data)
+                connection_id = json_data["connection_id"]
+                if connection_id in self.connections:
+                    if self.connections[connection_id].state == IndiLynxConnection.State.complete:
+                        pw: sirius_sdk.Pairwise = self.connections[connection_id].pairwise
+                        proposal = sirius_sdk.aries_rfc.ProposeCredentialMessage(**json_data)
+                        await sirius_sdk.send_to(proposal, pw)
+                        return 200, json.dumps({
+                                "state": "proposal-sent",
+                                "thread_id": proposal.id,
+                                "credential_id": proposal.id
+                        })
+                    else:
+                        log_msg("Connection is not complete")
+                else:
+                    log_msg("Connection id does not exist")
+
+            elif operation == "send-offer":
+                json_data = json.loads(data)
+                connection_id = json_data["connection_id"]
+                pw: sirius_sdk.Pairwise = self.connections[connection_id].pairwise
+                issuer_machine = sirius_sdk.aries_rfc.Issuer(holder=pw)
+                # json_data["credential_preview"]
+                # issuer_machine.issue(
+                #     values=
+                # )
 
     async def handle_out_of_band_POST(self, op, rec_id=None, data=None):
         operation = op["operation"]
