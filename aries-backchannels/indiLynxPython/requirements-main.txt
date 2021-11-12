@@ -1,1 +1,1 @@
-https://github.com/Sirius-social/sirius-sdk-python@master
+git+git://github.com/Sirius-social/sirius-sdk-python@master

@@ -79,6 +79,14 @@ class IndiLynxConnection:
         })
 
 
+class IndiLynxIssuing:
+
+    def __init__(self, connection_id: str, credential_id: str):
+        self.connection_id = connection_id
+        self.credential_id = credential_id
+        self.proposal = None
+
+
 class IndiLynxCloudAgentBackchannel(AgentBackchannel):
 
     def __init__(
@@ -102,6 +110,8 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         self.auto_respond_presentation_request = False
 
         self.connections = dict()
+        self.issuing = dict()
+        self.dkms_name = "default"
 
     async def start_listener(self):
         listener = await sirius_sdk.subscribe()
@@ -364,12 +374,30 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 if connection_id in self.connections:
                     if self.connections[connection_id].state == IndiLynxConnection.State.complete:
                         pw: sirius_sdk.Pairwise = self.connections[connection_id].pairwise
-                        proposal = sirius_sdk.aries_rfc.ProposeCredentialMessage(**json_data)
+                        proposed_attribs = []
+                        for attr in json_data["credential_proposal"]["attributes"]:
+                            proposed_attribs += sirius_sdk.aries_rfc.ProposedAttrib(attr["name"], attr["value"])
+                        proposal = sirius_sdk.aries_rfc.ProposeCredentialMessage(
+                            comment=json_data["comment"],
+                            proposal_attrib=proposed_attribs,
+                            schema_id=json_data["schema_id"],
+                            schema_name=json_data["schema_name"],
+                            schema_version=json_data["schema_version"],
+                            schema_issuer_did=json_data["schema_issuer_did"],
+                            cred_def_id=json_data["cred_def_id"],
+                            issuer_did=json_data["issuer_did"]
+                        )
                         await sirius_sdk.send_to(proposal, pw)
+                        credential_id = proposal.id
+                        self.issuing[connection_id] = IndiLynxIssuing(
+                            connection_id=connection_id,
+                            credential_id=credential_id
+                        )
+                        self.issuing[connection_id].proposal = proposal
                         return 200, json.dumps({
                                 "state": "proposal-sent",
                                 "thread_id": proposal.id,
-                                "credential_id": proposal.id
+                                "credential_id": credential_id
                         })
                     else:
                         log_msg("Connection is not complete")
@@ -381,10 +409,30 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 connection_id = json_data["connection_id"]
                 pw: sirius_sdk.Pairwise = self.connections[connection_id].pairwise
                 issuer_machine = sirius_sdk.aries_rfc.Issuer(holder=pw)
-                # json_data["credential_preview"]
-                # issuer_machine.issue(
-                #     values=
-                # )
+                values = {}
+                for attr in json_data["credential_preview"]["attributes"]:
+                    values[attr["name"]] = attr["value"]
+                proposal: sirius_sdk.aries_rfc.ProposeCredentialMessage = self.issuing[connection_id].proposal
+
+                dkms = await sirius_sdk.ledger(self.dkms_name)
+                schema = await dkms.load_schema(proposal.schema_id, self.did)
+                cred_def = await dkms.load_cred_def(proposal.cred_def_id, self.did)
+                credential_id = self.issuing[connection_id].credential_id
+                ok = await issuer_machine.issue(
+                    values=values,
+                    comment=json_data["comment"],
+                    schema=schema,
+                    cred_def=cred_def,
+                    cred_id=credential_id
+                )
+                if ok:
+                    return 200, json.dumps({
+                        "state": "credential-issued",
+                        "thread_id": proposal.id,
+                        "credential_id": credential_id
+                    })
+                else:
+                    return 500, str(issuer_machine.problem_report)
 
     async def handle_out_of_band_POST(self, op, rec_id=None, data=None):
         operation = op["operation"]
@@ -631,13 +679,13 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
 
         elif op["topic"] == "schema":
             schema_id = rec_id
-            dkms = await sirius_sdk.ledger(self.DKMS_NAME)
+            dkms = await sirius_sdk.ledger(self.dkms_name)
             schema = await dkms.load_schema(schema_id, self.public_did)
             return 200, json.dumps(schema)
 
         elif op["topic"] == "credential-definition":
             cred_def_id = rec_id
-            dkms = await sirius_sdk.ledger(self.DKMS_NAME)
+            dkms = await sirius_sdk.ledger(self.dkms_name)
             cred_defs = await dkms.fetch_cred_defs(id_=cred_def_id)
             return 200, json.dumps(cred_defs)
 
