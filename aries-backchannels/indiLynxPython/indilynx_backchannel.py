@@ -81,7 +81,7 @@ class IndiLynxConnection:
 
 class IndiLynxIssuing:
 
-    def __init__(self, connection_id: str, credential_id: str):
+    def __init__(self, connection_id: str, credential_id: str=None):
         self.connection_id = connection_id
         self.credential_id = credential_id
         self.proposal = None
@@ -112,6 +112,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         self.connections = dict()
         self.issuing = dict()
         self.dkms_name = "default"
+        self.master_secret_id = "master_secret_id"
 
     async def start_listener(self):
         listener = await sirius_sdk.subscribe()
@@ -135,119 +136,29 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                     await sirius_sdk.PairwiseList.ensure_exists(pairwise)
                     self.connections[connection_key].pairwise = pairwise
                     self.connections[connection_key].state = IndiLynxConnection.State.complete
-
-    async def listen_webhooks(self, webhook_port):
-        self.webhook_port = webhook_port
-        if RUN_MODE == "pwd":
-            self.webhook_url = f"http://localhost:{str(webhook_port)}/webhooks"
-        else:
-            self.webhook_url = (
-                f"http://{self.external_host}:{str(webhook_port)}/webhooks"
-            )
-        app = web.Application()
-        app.add_routes([web.post("/webhooks/topic/{topic}/", self._receive_webhook)])
-        runner = web.AppRunner(app)
-        await runner.setup()
-        self.webhook_site = web.TCPSite(runner, "0.0.0.0", webhook_port)
-        await self.webhook_site.start()
-        print("Listening to web_hooks on port", webhook_port)
-
-    async def _receive_webhook(self, request: ClientRequest):
-        topic = request.match_info["topic"]
-        payload = await request.json()
-        await self.handle_webhook(topic, payload)
-        # TODO web hooks don't require a response???
-        return web.Response(text="")
-
-    async def handle_webhook(self, topic: str, payload):
-        if topic != "webhook":  # would recurse
-            handler = f"handle_{topic}"
-
-            # Remove this handler change when bug is fixed.
-            if handler == "handle_oob-invitation":
-                handler = "handle_oob_invitation"
-
-            method = getattr(self, handler, None)
-            # put a log message here
-            log_msg("Passing webhook payload to handler " + handler)
-            if method:
-                await method(payload)
-            else:
-                log_msg(
-                    f"Error: agent {self.ident} "
-                    f"has no method {handler} "
-                    f"to handle webhook on topic {topic}"
+            elif isinstance(request, sirius_sdk.aries_rfc.OfferCredentialMessage):
+                log_msg("received: " + str(request))
+                offer: sirius_sdk.aries_rfc.OfferCredentialMessage = request
+                pairwise = event.pairwise
+                holder_machine = sirius_sdk.aries_rfc.Holder(
+                    pairwise=pairwise,
+                    logger=Logger()
                 )
-        else:
-            log_msg(
-                "in webhook, topic is: " + topic + " payload is: " + json.dumps(payload)
-            )
-
-    async def handle_connections(self, message):
-        if "request_id" in message:
-            # This is a did-exchange message based on a Public DID non-invitation
-            request_id = message["request_id"]
-            push_resource(request_id, "didexchange-msg", message)
-        elif message["connection_protocol"] == "didexchange/1.0":
-            # This is an did-exchange message based on a Non-Public DID invitation
-            invitation_id = message["invitation_msg_id"]
-            push_resource(invitation_id, "didexchange-msg", message)
-        elif message["connection_protocol"] == "connections/1.0":
-            connection_id = message["connection_id"]
-            push_resource(connection_id, "connection-msg", message)
-        else:
-            raise Exception(
-                f"Unknown message type in Connections Webhook: {json.dumps(message)}"
-            )
-        log_msg("Received a Connection Webhook message: " + json.dumps(message))
-
-    async def handle_issue_credential(self, message):
-        thread_id = message["thread_id"]
-        push_resource(thread_id, "credential-msg", message)
-        log_msg("Received Issue Credential Webhook message: " + json.dumps(message))
-        if "revocation_id" in message:  # also push as a revocation message
-            push_resource(thread_id, "revocation-registry-msg", message)
-            log_msg("Issue Credential Webhook message contains revocation info")
-
-    async def handle_issue_credential_v2_0(self, message):
-        thread_id = message["thread_id"]
-        push_resource(thread_id, "credential-msg", message)
-        log_msg("Received Issue Credential v2 Webhook message: " + json.dumps(message))
-        if "revocation_id" in message:  # also push as a revocation message
-            push_resource(thread_id, "revocation-registry-msg", message)
-            log_msg("Issue Credential Webhook message contains revocation info")
-
-    async def handle_present_proof_v2_0(self, message):
-        thread_id = message["thread_id"]
-        push_resource(thread_id, "presentation-msg", message)
-        log_msg("Received a Present Proof v2 Webhook message: " + json.dumps(message))
-
-    async def handle_present_proof(self, message):
-        thread_id = message["thread_id"]
-        push_resource(thread_id, "presentation-msg", message)
-        log_msg("Received a Present Proof Webhook message: " + json.dumps(message))
-
-    async def handle_revocation_registry(self, message):
-        # No thread id in the webhook for revocation registry messages
-        cred_def_id = message["cred_def_id"]
-        push_resource(cred_def_id, "revocation-registry-msg", message)
-        log_msg("Received Revocation Registry Webhook message: " + json.dumps(message))
-
-    # TODO Handle handle_issuer_cred_rev (this must be newer than the revocation tests?)
-    # TODO Handle handle_issue_credential_v2_0_indy
-
-    async def handle_oob_invitation(self, message):
-        # No thread id in the webhook for revocation registry messages
-        invitation_id = message["invitation_id"]
-        push_resource(invitation_id, "oob-inviation-msg", message)
-        log_msg(
-            "Received Out of Band Invitation Webhook message: " + json.dumps(message)
-        )
-
-    async def handle_problem_report(self, message):
-        thread_id = message["thread_id"]
-        push_resource(thread_id, "problem-report-msg", message)
-        log_msg("Received Problem Report Webhook message: " + json.dumps(message))
+                success, cred_id = await holder_machine.accept(
+                    offer=offer,
+                    master_secret_id=self.master_secret_id
+                )
+            elif isinstance(request, sirius_sdk.aries_rfc.ProposeCredentialMessage):
+                proposal: sirius_sdk.aries_rfc.ProposeCredentialMessage = request
+                pairwise = event.pairwise
+                conn_id = None
+                for conn_id in self.connections:
+                    conn = self.connections[conn_id]
+                    if conn.pairwise and conn.pairwise.their.did == pairwise.their.did:
+                        conn_id = conn.connection_id
+                if conn_id:
+                    self.issuing[conn_id] = IndiLynxIssuing(connection_id=conn_id, credential_id=conn_id)
+                    self.issuing[conn_id].proposal = proposal
 
     async def swap_thread_id_for_exchange_id(self, thread_id, data_type, id_txt):
         timeout = 0
@@ -971,8 +882,6 @@ async def main(start_port: int, show_timing: bool = False, interactive: bool = T
         # start backchannel (common across all types of agents)
         await agent.listen_backchannel(start_port)
 
-        # start aca-py agent sub-process and listen for web hooks
-        await agent.listen_webhooks(start_port + 3)
         #await agent.register_did()
 
         asyncio.get_event_loop().create_task(agent.start_listener())
