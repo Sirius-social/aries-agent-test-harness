@@ -136,6 +136,12 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                     self.connections[connection_key].pairwise = pairwise
                     self.connections[connection_key].state = IndiLynxConnection.State.complete
 
+    async def start_dummy_listener(self):
+        listener = await sirius_sdk.subscribe()
+        print("Listening 2")
+        async for event in listener:
+            log_msg("Received event: " + str(event))
+
     async def listen_webhooks(self, webhook_port):
         self.webhook_port = webhook_port
         if RUN_MODE == "pwd":
@@ -641,7 +647,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             status_msg = "Active" if self.ACTIVE else "Inactive"
             return status, json.dumps({"status": status_msg})
 
-        if op["topic"] == "version":
+        elif op["topic"] == "version":
             return 200, "1.0"
 
         elif op["topic"] == "connection":
@@ -976,6 +982,7 @@ async def main(start_port: int, show_timing: bool = False, interactive: bool = T
         #await agent.register_did()
 
         asyncio.get_event_loop().create_task(agent.start_listener())
+        asyncio.get_event_loop().create_task(agent.start_dummy_listener())
         agent.activate()
 
         # now wait ...
