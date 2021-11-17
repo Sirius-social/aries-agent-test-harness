@@ -85,6 +85,16 @@ class IndiLynxIssuing:
         self.connection_id = connection_id
         self.credential_id = credential_id
         self.proposal = None
+        self.referent: str = None
+        self.schema_id: str = None
+        self.cred_def_id: str = None
+        self.thread_id: str = None
+
+
+class IndiLynxPresentationExchangeRecord:
+
+    def __init__(self):
+        self.thread_id: str = None
 
 
 class IndiLynxCloudAgentBackchannel(AgentBackchannel):
@@ -111,6 +121,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
 
         self.connections = dict()
         self.issuing = dict()
+        self.presentations = []
         self.dkms_name = "default"
         self.master_secret_id = "master_secret_id"
 
@@ -159,6 +170,22 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 if conn_id:
                     self.issuing[conn_id] = IndiLynxIssuing(connection_id=conn_id, credential_id=conn_id)
                     self.issuing[conn_id].proposal = proposal
+            elif isinstance(request, sirius_sdk.aries_rfc.RequestPresentationMessage):
+                pres_req: sirius_sdk.aries_rfc.RequestPresentationMessage = request
+                verifier = event.pairwise
+                dkms = sirius_sdk.ledger(self.dkms_name)
+                holder_machine = sirius_sdk.aries_rfc.Prover(
+                    verifier=verifier,
+                    ledger=dkms,
+                    logger=Logger()
+                )
+                pres_ex_record = IndiLynxPresentationExchangeRecord()
+                pres_ex_record.thread_id = pres_req.id
+                self.presentations.append(pres_ex_record)
+                success = await holder_machine.prove(
+                    request=pres_req,
+                    master_secret_id=self.master_secret_id
+                )
 
     async def start_dummy_listener(self):
         listener = await sirius_sdk.subscribe()
@@ -350,6 +377,38 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                     })
                 else:
                     return 500, str(issuer_machine.problem_report)
+        elif op["topic"] == "proof":
+            operation = op["operation"]
+            if operation == "send-proposal":
+                return 500, "Not implemented"
+            elif operation == "send-request":
+                json_data = json.loads(data)
+                connection_id = json_data["connection_id"]
+                presentation_request = json_data["presentation_request"]
+                comment = presentation_request["comment"]
+                proof_request = presentation_request["proof_request"]["data"]
+
+                prover_pairwise = self.connections[connection_id].pairwise
+                dkms = await sirius_sdk.ledger(self.dkms_name)
+                verifier_machine = sirius_sdk.aries_rfc.Verifier(
+                    prover=prover_pairwise,
+                    ledger=dkms,
+                    logger=Logger()
+                )
+
+                pres_ex_record = IndiLynxPresentationExchangeRecord()
+                self.presentations.append(pres_ex_record)
+
+                success = await verifier_machine.verify(proof_request)
+                if success:
+                    return 200, json.dumps({
+                        "state": "done",
+                        #"thread_id":
+                    })
+            elif operation == "send-presentation":
+                return 200, json.dumps({
+
+                })
 
     async def handle_out_of_band_POST(self, op, rec_id=None, data=None):
         operation = op["operation"]
@@ -405,150 +464,6 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             resp_text = self.agent_state_translation(op["topic"], operation, resp_text)
         return (resp_status, resp_text)
 
-    async def handle_did_exchange_POST(self, op, rec_id=None, data=None):
-        operation = op["operation"]
-        agent_operation = "/didexchange/"
-        if operation == "send-request":
-            agent_operation = agent_operation + rec_id + "/accept-invitation"
-
-        elif operation == "receive-invitation":
-            agent_operation = agent_operation + operation
-
-        elif operation == "send-response":
-            if self.auto_accept_requests:
-                resp_status = 200
-                resp_text = 'Aca-py agent in auto accept request mode. accept-request operation not called.'
-                return (resp_status, resp_text)
-            else:
-                agent_operation = agent_operation + rec_id + "/accept-request"
-                await asyncio.sleep(1)
-
-        elif operation == "create-request-resolvable-did":
-            their_public_did = data["their_public_did"]
-            agent_operation = (
-                agent_operation + "create-request?their_public_did=" + their_public_did
-            )
-            data = None
-
-        elif operation == "receive-request-resolvable-did":
-            # as of PR 1182 in aries-cloudagent-python receive-request is no longer needed.
-            # this is done automatically by the responder.
-            # The test expects a connection_id returned so, return the last webhook message
-            # agent_operation = agent_operation + "receive-request"
-
-            (wh_status, wh_text) = await self.make_agent_GET_request_response(
-                op["topic"], rec_id=None, message_name="didexchange-msg"
-            )
-            return (wh_status, wh_text)
-
-        (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-        if resp_status == 200:
-            resp_text = self.agent_state_translation(op["topic"], operation, resp_text)
-        return (resp_status, resp_text)
-
-    async def handle_issue_credential_v2_POST(self, op, rec_id=None, data=None):
-        operation = op["operation"]
-        topic = op["topic"]
-
-        if self.auto_respond_credential_proposal and operation == "send-offer" and rec_id:
-            resp_status = 200
-            resp_text = '{"message": "Aca-py agent in auto respond mode for proposal. send-offer operation not called."}'
-            return (resp_status, resp_text)
-        elif self.auto_respond_credential_offer and operation == "send-request":
-            resp_status = 200
-            resp_text = '{"message": "Aca-py agent in auto respond mode for offer. send-request operation not called."}'
-            return (resp_status, resp_text)
-        elif self.auto_respond_credential_request and operation == "issue":
-            resp_status = 200
-            resp_text = '{"message": "Aca-py agent in auto respond mode for request. issue operation not called."}'
-            return (resp_status, resp_text)
-        else:
-
-            if operation == "prepare-json-ld":
-                key_type = self.proofTypeKeyTypeTranslationDict[data["proof_type"]]
-
-                # Retrieve matching dids
-                resp_status, resp_text = await self.admin_GET(
-                    "/wallet/did",
-                    params={"method": data["did_method"], "key_type": key_type},
-                )
-
-                did = None
-                if resp_status == 200:
-                    resp_json = json.loads(resp_text)
-
-                    # If there is a matching did use it
-                    if len(resp_json["results"]) > 0:
-                        # Get first matching did
-                        did = resp_json["results"][0]["did"]
-
-                # If there was no matching did create a new one
-                if not did:
-                    (resp_status, resp_text) = await self.admin_POST(
-                        "/wallet/did/create",
-                        {"method": data["did_method"], "options": {"key_type": key_type}},
-                    )
-                    if resp_status == 200:
-                        resp_json = json.loads(resp_text)
-                        did = resp_json["result"]["did"]
-
-                if did:
-                    resp_text = json.dumps({"did": did})
-
-                log_msg(resp_status, resp_text)
-                return (resp_status, resp_text)
-
-            if rec_id is None:
-                agent_operation = (
-                    self.TopicTranslationDict[topic]
-                    + self.issueCredentialv2OperationTranslationDict[operation]
-                )
-            else:
-                # swap thread id for cred ex id from the webhook
-                cred_ex_id = await self.swap_thread_id_for_exchange_id(
-                    rec_id, "credential-msg", "cred_ex_id"
-                )
-                agent_operation = (
-                    self.TopicTranslationDict[topic]
-                    + "records/"
-                    + cred_ex_id
-                    + "/"
-                    + self.issueCredentialv2OperationTranslationDict[operation]
-                )
-
-            # Map AATH filter keys to ACA-Py filter keys
-            # e.g. data.filters.json-ld becomes data.filters.ld_proof
-            if data and "filter" in data:
-                data["filter"] = dict(
-                    (self.credFormatFilterTranslationDict[name], val)
-                    for name, val in data["filter"].items()
-                )
-
-            log_msg(agent_operation, data)
-            await asyncio.sleep(1)
-            (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-
-            if operation == "store":
-                resp_json = json.loads(resp_text)
-
-                if resp_json["ld_proof"]:
-                    resp_json["json-ld"] = resp_json.pop("ld_proof")
-
-                # Return less ACA-Py specific credential identifier key
-                for key in resp_json:
-                    if resp_json[key] and resp_json[key].get("cred_id_stored"):
-                        resp_json[key]["credential_id"] = resp_json[key].get(
-                            "cred_id_stored"
-                        )
-
-                resp_text = json.dumps(resp_json)
-
-            log_msg(resp_status, resp_text)
-            # Looks like all v2 states are RFC states. Yah!
-            # if resp_status == 200: resp_text = self.agent_state_translation(topic], None, resp_text)
-            resp_text = self.move_field_to_top_level(resp_text, "state")
-            return (resp_status, resp_text)
-
     async def make_agent_GET_request(
         self, op, rec_id=None, text=False, params=None
     ) -> Tuple[int, str]:
@@ -579,20 +494,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             return 500, "Not implemented"
 
         elif op["topic"] == "active-connection" and rec_id:
-            agent_operation = f"/connections?their_did={rec_id}"
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status != 200:
-                return (resp_status, resp_text)
-
-            # find the first active connection 
-            resp_json = json.loads(resp_text)
-            for connection in resp_json["results"]:
-                if connection["state"] == "active":
-                    resp_text = json.dumps(connection)
-                    return (resp_status, resp_text)
-
-            return (400, f"Active connection not found for their_did {rec_id}")
+            return 500, "Not implemented"
 
         elif op["topic"] == "schema":
             schema_id = rec_id
@@ -607,113 +509,38 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             return 200, json.dumps(cred_defs)
 
         elif op["topic"] == "issue-credential":
-            # swap thread id for cred ex id from the webhook
-            cred_ex_id = await self.swap_thread_id_for_exchange_id(
-                rec_id, "credential-msg", "credential_exchange_id"
-            )
-            agent_operation = (
-                self.TopicTranslationDict[op["topic"]] + "records/" + cred_ex_id
-            )
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status == 200:
-                resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-            return (resp_status, resp_text)
+            for conn_id in self.issuing:
+                iss: IndiLynxIssuing = self.issuing[conn_id]
+                if iss.thread_id == rec_id:
+                    return 200, json.dumps({
+                        "thread_id": iss.thread_id,
+                        "credential_id": iss.credential_id
+                    })
+            return 500, f"Cred {rec_id} not found"
 
         elif op["topic"] == "issue-credential-v2":
-            # swap thread id for cred ex id from the webhook
-            cred_ex_id = await self.swap_thread_id_for_exchange_id(
-                rec_id, "credential-msg", "cred_ex_id"
-            )
-            agent_operation = (
-                self.TopicTranslationDict[op["topic"]] + "records/" + cred_ex_id
-            )
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            resp_text = self.move_field_to_top_level(resp_text, "state")
-            return (resp_status, resp_text)
+            return 500, "Not implemented"
 
         elif op["topic"] == "credential":
-            operation = op["operation"]
-            if operation == "revoked":
-                agent_operation = "/credential/" + operation + "/" + rec_id
-                (resp_status, resp_text) = await self.admin_GET(agent_operation)
-                return (resp_status, resp_text)
-            else:
-                # NOTE: We don't know what type of credential to fetch, so we first try an indy credential.
-                # Maybe it would be nice if the test harness passed the credential format that belonged to the
-                # credential
-                # First try indy credential
-                agent_operation = "/credential/" + rec_id
-                (resp_status, resp_text) = await self.admin_GET(agent_operation)
-
-                # If not found try w3c credential
-                if resp_status == 404:
-                    agent_operation = "/credential/w3c/" + rec_id
-                    (resp_status, resp_text) = await self.admin_GET(agent_operation)
-
-                    if resp_status == 200:
-                        resp_json = json.loads(resp_text)
-                        return (
-                            resp_status,
-                            json.dumps(
-                                {
-                                    "credential_id": resp_json["record_id"],
-                                    "credential": resp_json["cred_value"],
-                                }
-                            ),
-                        )
-
-                return (resp_status, resp_text)
+            for conn_id in self.issuing:
+                iss: IndiLynxIssuing = self.issuing[conn_id]
+                if iss.credential_id == rec_id:
+                    return 200, json.dumps({
+                        "referent": iss.referent,
+                        "schema_id": iss.schema_id,
+                        "cred_def_id": iss.cred_def_id
+                    })
+            return 404, f"Cred {rec_id} not found"
 
         elif op["topic"] == "proof":
-            # swap thread id for pres ex id from the webhook
-            pres_ex_id = await self.swap_thread_id_for_exchange_id(
-                rec_id, "presentation-msg", "presentation_exchange_id"
-            )
-            agent_operation = "/present-proof/records/" + pres_ex_id
+            for presentation in self.presentations:
+                if presentation.thread_id == rec_id:
+                    return 200, json.dumps({
+                        "thread_id": presentation.thread_id
+                    })
+            return 404, f"Presentation exchange record with thread id {rec_id} not found"
 
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status == 200:
-                resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-            return (resp_status, resp_text)
-
-        elif op["topic"] == "proof-v2":
-            # swap thread id for pres ex id from the webhook
-            pres_ex_id = await self.swap_thread_id_for_exchange_id(
-                rec_id, "presentation-msg", "pres_ex_id"
-            )
-            agent_operation = (
-                self.TopicTranslationDict[op["topic"]] + "records/" + pres_ex_id
-            )
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            # if resp_status == 200: resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-            return (resp_status, resp_text)
-
-        elif op["topic"] == "revocation":
-            operation = op["operation"]
-            (
-                agent_operation,
-                admin_data,
-            ) = await self.get_agent_operation_acapy_version_based(
-                op["topic"], operation, rec_id, data=None
-            )
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            return (resp_status, resp_text)
-
-        elif op["topic"] == "did-exchange":
-
-            connection_id = rec_id
-            agent_operation = "/connections/" + connection_id
-
-            (resp_status, resp_text) = await self.admin_GET(agent_operation)
-            if resp_status == 200:
-                resp_text = self.agent_state_translation(op["topic"], None, resp_text)
-            return (resp_status, resp_text)
-
-        return (501, "501: Not Implemented\n\n".encode("utf8"))
+        return 501, "501: Not Implemented\n\n".encode("utf8")
 
     async def make_agent_DELETE_request(
         self, op, rec_id=None, data=None, text=False, params=None
