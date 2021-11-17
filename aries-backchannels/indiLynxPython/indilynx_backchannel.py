@@ -293,7 +293,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             schema_name = json_data["schema_name"]
             schema_version = json_data["schema_version"]
             attributes = json_data["attributes"]
-            schema_id, anoncred_schema = await sirius_sdk.AnonCreds.issuer_create_schema(issuer_did=self.did,
+            schema_id, anoncred_schema = await sirius_sdk.AnonCreds.issuer_create_schema(issuer_did=self.did["did"],
                                                             name=schema_name,
                                                             version=schema_version,
                                                             attrs=attributes)
@@ -359,8 +359,8 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 proposal: sirius_sdk.aries_rfc.ProposeCredentialMessage = self.issuing[connection_id].proposal
 
                 dkms = await sirius_sdk.ledger(self.dkms_name)
-                schema = await dkms.load_schema(proposal.schema_id, self.did)
-                cred_def = await dkms.load_cred_def(proposal.cred_def_id, self.did)
+                schema = await dkms.load_schema(proposal.schema_id, self.did["did"])
+                cred_def = await dkms.load_cred_def(proposal.cred_def_id, self.did["did"])
                 credential_id = self.issuing[connection_id].credential_id
                 ok = await issuer_machine.issue(
                     values=values,
@@ -491,7 +491,11 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 return 200, str(res)
 
         elif op["topic"] == "did":
-            return 500, "Not implemented"
+            if self.did:
+                return 200, json.dumps({
+                    "did": self.did["did"],
+                    "verkey": self.did["verkey"]
+                })
 
         elif op["topic"] == "active-connection" and rec_id:
             return 500, "Not implemented"
@@ -688,7 +692,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         return (501, "501: Not Implemented\n\n".encode("utf8"))
 
 
-async def main(start_port: int, show_timing: bool = False, interactive: bool = True):
+async def main(start_port: int, show_timing: bool = False, interactive: bool = True, did=None):
 
     # check for extra args
     extra_args = {}
@@ -711,6 +715,8 @@ async def main(start_port: int, show_timing: bool = False, interactive: bool = T
             genesis_data="{}",
             extra_args=extra_args,
         )
+
+        agent.did = did
 
         # start backchannel (common across all types of agents)
         await agent.listen_backchannel(start_port)
@@ -792,12 +798,12 @@ if __name__ == "__main__":
     else:
         test_agent_name = "agent1"
 
-    gov_agent_params = asyncio.get_event_loop().run_until_complete(get_agent_params(test_agent_name))
+    gov_agent_params, did = asyncio.get_event_loop().run_until_complete(get_agent_params(test_agent_name))
     sirius_sdk.init(**gov_agent_params)
 
     try:
         asyncio.get_event_loop().run_until_complete(
-            main(start_port=args.port, interactive=args.interactive)
+            main(start_port=args.port, interactive=args.interactive, did=did)
         )
     except KeyboardInterrupt:
         os._exit(1)

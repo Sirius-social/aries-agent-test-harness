@@ -38,4 +38,4 @@ async def get_agent_params(agent_name: str):
             ),
             their_verkey=p2p['agent']['verkey']
         )
-    }
+    }, list(agent['entities'].items())[0][1]
