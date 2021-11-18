@@ -289,47 +289,59 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 })
 
         elif op["topic"] == "schema":
-            json_data = json.loads(data)
-            schema_name = json_data["schema_name"]
-            schema_version = json_data["schema_version"]
-            attributes = json_data["attributes"]
+            schema_name = data["schema_name"]
+            schema_version = data["schema_version"]
+            attributes = data["attributes"]
             schema_id, anoncred_schema = await sirius_sdk.AnonCreds.issuer_create_schema(issuer_did=self.did["did"],
                                                             name=schema_name,
                                                             version=schema_version,
                                                             attrs=attributes)
-            return 200, json.dumps({
-                "schema_id": schema_id,
-                "schema": anoncred_schema
-            })
+            dkms = await sirius_sdk.ledger(self.dkms_name)
+            ok, schema = await dkms.register_schema(anoncred_schema, self.did["did"])
+            if ok:
+                return 200, json.dumps({
+                    "schema_id": schema_id,
+                    "schema": schema
+                })
+            else:
+                return 500, "Failed to register schema"
 
         elif op["topic"] == "credential-definition":
-            json_data = json.loads(data)
-            support_revocation = json_data["support_revocation"]
-            schema_id = json_data["schema_id"]
-            tag = json_data["tag"]
+            support_revocation = data["support_revocation"]
+            schema_id = data["schema_id"]
+            tag = data["tag"]
 
-            return 500, "Not implemented"
+            dkms = await sirius_sdk.ledger(self.dkms_name)
+            schema = await dkms.load_schema(schema_id, self.did["did"])
+            ok, cred_def = await dkms.register_cred_def(
+                cred_def=sirius_sdk.CredentialDefinition(tag='TAG', schema=schema),
+                submitter_did=self.did["did"])
+            if ok:
+                return 200, json.dumps({
+                    "credential_definition_id": cred_def.id
+                })
+            else:
+                return 500, "Failed to create cred def"
 
         elif op["topic"] == "issue-credential":
             operation = op["operation"]
             if operation == "send-proposal":
-                json_data = json.loads(data)
-                connection_id = json_data["connection_id"]
+                connection_id = data["connection_id"]
                 if connection_id in self.connections:
                     if self.connections[connection_id].state == IndiLynxConnection.State.complete:
                         pw: sirius_sdk.Pairwise = self.connections[connection_id].pairwise
                         proposed_attribs = []
-                        for attr in json_data["credential_proposal"]["attributes"]:
+                        for attr in data["credential_proposal"]["attributes"]:
                             proposed_attribs += sirius_sdk.aries_rfc.ProposedAttrib(attr["name"], attr["value"])
                         proposal = sirius_sdk.aries_rfc.ProposeCredentialMessage(
-                            comment=json_data["comment"],
+                            comment=data["comment"],
                             proposal_attrib=proposed_attribs,
-                            schema_id=json_data["schema_id"],
-                            schema_name=json_data["schema_name"],
-                            schema_version=json_data["schema_version"],
-                            schema_issuer_did=json_data["schema_issuer_did"],
-                            cred_def_id=json_data["cred_def_id"],
-                            issuer_did=json_data["issuer_did"]
+                            schema_id=data["schema_id"],
+                            schema_name=data["schema_name"],
+                            schema_version=data["schema_version"],
+                            schema_issuer_did=data["schema_issuer_did"],
+                            cred_def_id=data["cred_def_id"],
+                            issuer_did=data["issuer_did"]
                         )
                         await sirius_sdk.send_to(proposal, pw)
                         credential_id = proposal.id
@@ -349,12 +361,11 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                     log_msg("Connection id does not exist")
 
             elif operation == "send-offer":
-                json_data = json.loads(data)
-                connection_id = json_data["connection_id"]
+                connection_id = data["connection_id"]
                 pw: sirius_sdk.Pairwise = self.connections[connection_id].pairwise
                 issuer_machine = sirius_sdk.aries_rfc.Issuer(holder=pw)
                 values = {}
-                for attr in json_data["credential_preview"]["attributes"]:
+                for attr in data["credential_preview"]["attributes"]:
                     values[attr["name"]] = attr["value"]
                 proposal: sirius_sdk.aries_rfc.ProposeCredentialMessage = self.issuing[connection_id].proposal
 
@@ -364,7 +375,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 credential_id = self.issuing[connection_id].credential_id
                 ok = await issuer_machine.issue(
                     values=values,
-                    comment=json_data["comment"],
+                    comment=data["comment"],
                     schema=schema,
                     cred_def=cred_def,
                     cred_id=credential_id
@@ -382,9 +393,8 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             if operation == "send-proposal":
                 return 500, "Not implemented"
             elif operation == "send-request":
-                json_data = json.loads(data)
-                connection_id = json_data["connection_id"]
-                presentation_request = json_data["presentation_request"]
+                connection_id = data["connection_id"]
+                presentation_request = data["presentation_request"]
                 comment = presentation_request["comment"]
                 proof_request = presentation_request["proof_request"]["data"]
 
@@ -409,60 +419,6 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                 return 200, json.dumps({
 
                 })
-
-    async def handle_out_of_band_POST(self, op, rec_id=None, data=None):
-        operation = op["operation"]
-        agent_operation = "/out-of-band/"
-        log_msg(
-            f"Data passed to backchannel by test for operation: {agent_operation}", data
-        )
-        if operation == "send-invitation-message":
-            # http://localhost:8022/out-of-band/create-invitation?auto_accept=false&multi_use=false
-            # TODO Check the data for auto_accept and multi_use. If it exists use those values then pop them out, otherwise false.
-            auto_accept = "false"
-            multi_use = "false"
-            agent_operation = (
-                agent_operation
-                + "create-invitation"
-                + "?multi_use="
-                + multi_use
-            )
-
-            # Add handshake protocols to message body
-            admindata = {
-                "handshake_protocols": [
-                    "did:sov:BzCbsNYhMrjHiqZDTUASHg;spec/didexchange/1.0"
-                ],
-                "use_public_did": data["use_public_did"],
-            }
-            data = admindata
-
-        elif operation == "receive-invitation":
-            # TODO check for Alias and Auto_accept in data to add to the call (works without for now)
-            if "use_existing_connection" in data:
-                use_existing_connection = str(data["use_existing_connection"]).lower()
-                data.pop("use_existing_connection")
-            else:
-                use_existing_connection = "false"
-            auto_accept = "false"
-            agent_operation = (
-                agent_operation
-                + "receive-invitation"
-                + "?use_existing_connection="
-                + use_existing_connection
-            )
-            # agent_operation = "/didexchange/" + "receive-invitation"
-
-        log_msg(
-            f"Data translated by backchannel to send to agent for operation: {agent_operation}",
-            data,
-        )
-
-        (resp_status, resp_text) = await self.admin_POST(agent_operation, data)
-        log_msg(resp_status, resp_text)
-        if resp_status == 200:
-            resp_text = self.agent_state_translation(op["topic"], operation, resp_text)
-        return (resp_status, resp_text)
 
     async def make_agent_GET_request(
         self, op, rec_id=None, text=False, params=None
