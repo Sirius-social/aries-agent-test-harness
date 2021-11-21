@@ -292,16 +292,20 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
             schema_name = data["schema_name"]
             schema_version = data["schema_version"]
             attributes = data["attributes"]
-            schema_id, anoncred_schema = await sirius_sdk.AnonCreds.issuer_create_schema(issuer_did=self.did["did"],
-                                                            name=schema_name,
-                                                            version=schema_version,
-                                                            attrs=attributes)
+            schema_id, anoncred_schema = await sirius_sdk.AnonCreds.issuer_create_schema(
+                issuer_did=self.did["did"],
+                name=schema_name,
+                version=schema_version,
+                attrs=attributes
+            )
             dkms = await sirius_sdk.ledger(self.dkms_name)
-            ok, schema = await dkms.register_schema(anoncred_schema, self.did["did"])
-            if ok:
+            schema = await dkms.ensure_schema_exists(anoncred_schema, self.did["did"])
+            if not schema:
+                ok, schema = await dkms.register_schema(anoncred_schema, self.did["did"])
+            if schema:
                 return 200, json.dumps({
                     "schema_id": schema_id,
-                    "schema": schema
+                    "schema": schema.body
                 })
             else:
                 return 500, "Failed to register schema"
@@ -459,14 +463,17 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
         elif op["topic"] == "schema":
             schema_id = rec_id
             dkms = await sirius_sdk.ledger(self.dkms_name)
-            schema = await dkms.load_schema(schema_id, self.public_did)
-            return 200, json.dumps(schema)
+            schema = await dkms.load_schema(schema_id, self.did['did'])
+            return 200, json.dumps(schema.body)
 
         elif op["topic"] == "credential-definition":
             cred_def_id = rec_id
             dkms = await sirius_sdk.ledger(self.dkms_name)
             cred_defs = await dkms.fetch_cred_defs(id_=cred_def_id)
-            return 200, json.dumps(cred_defs)
+            if len(cred_defs) > 0:
+                return 200, json.dumps(cred_defs[0].body)
+            else:
+                return 500, f"Credential definition with id {cred_def_id} does not exist"
 
         elif op["topic"] == "issue-credential":
             for conn_id in self.issuing:
