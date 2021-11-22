@@ -317,15 +317,21 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
 
             dkms = await sirius_sdk.ledger(self.dkms_name)
             schema = await dkms.load_schema(schema_id, self.did["did"])
-            ok, cred_def = await dkms.register_cred_def(
-                cred_def=sirius_sdk.CredentialDefinition(tag='TAG', schema=schema),
-                submitter_did=self.did["did"])
-            if ok:
-                return 200, json.dumps({
-                    "credential_definition_id": cred_def.id
-                })
+            cred_defs = await dkms.fetch_cred_defs(schema_id=schema_id, submitter_did=self.did["did"])
+            if len(cred_defs) > 0:
+                ok, cred_def = await dkms.register_cred_def(
+                    cred_def=sirius_sdk.CredentialDefinition(tag='TAG', schema=schema),
+                    submitter_did=self.did["did"])
+                if ok:
+                    return 200, json.dumps({
+                        "credential_definition_id": cred_def.id
+                    })
+                else:
+                    return 500, "Failed to create cred def"
             else:
-                return 500, "Failed to create cred def"
+                return 200, json.dumps({
+                    "credential_definition_id": cred_defs[0].id
+                })
 
         elif op["topic"] == "issue-credential":
             operation = op["operation"]
@@ -338,7 +344,7 @@ class IndiLynxCloudAgentBackchannel(AgentBackchannel):
                         for attr in data["credential_proposal"]["attributes"]:
                             proposed_attribs += sirius_sdk.aries_rfc.ProposedAttrib(attr["name"], attr["value"])
                         proposal = sirius_sdk.aries_rfc.ProposeCredentialMessage(
-                            comment=data["comment"],
+                            comment=data.get("comment", None),
                             proposal_attrib=proposed_attribs,
                             schema_id=data["schema_id"],
                             schema_name=data["schema_name"],

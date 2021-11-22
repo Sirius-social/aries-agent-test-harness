@@ -1,1 +1,1 @@
-git+git://github.com/Sirius-social/sirius-sdk-python@master
+git+git://github.com/Sirius-social/sirius-sdk-python@aries-agent-test-harness
