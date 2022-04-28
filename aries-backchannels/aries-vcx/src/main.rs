@@ -6,7 +6,8 @@ use std::sync::Mutex;
 
 use actix_web::{App, HttpServer, web, middleware};
 use pickledb::{PickleDb, PickleDbDumpPolicy, SerializationMethod};
-use crate::controllers::{general, connection, credential_definition, issuance, schema, presentation};
+use crate::controllers::{general, connection, credential_definition, issuance, schema, presentation, revocation};
+use clap::Parser;
 use aries_vcx::handlers::connection::connection::Connection;
  
 extern crate serde;
@@ -21,12 +22,11 @@ extern crate uuid;
 extern crate futures_util;
 extern crate clap;
 extern crate reqwest;
+extern crate derive_builder;
 
-use clap::{AppSettings, Clap};
 
-#[derive(Clap)]
+#[derive(Parser)]
 #[clap(version = "1.0")]
-#[clap(setting = AppSettings::ColoredHelp)]
 struct Opts {
     #[clap(short, long, default_value = "9020")]
     port: u32,
@@ -40,18 +40,19 @@ enum State {
     Initial,
     Invited,
     Requested,
+    RequestSet,
     Responded,
     Complete,
     Failure,
     Unknown,
+    ProposalSent,
+    ProposalReceived,
     OfferSent,
     RequestReceived,
     CredentialSent,
     OfferReceived,
     RequestSent,
-    CredentialReceived,
     PresentationSent,
-    PresentationReceived,
     Done
 }
 
@@ -59,39 +60,57 @@ enum State {
 #[serde(rename_all = "lowercase")]
 enum Status {
     Active,
-    Inactive
 }
 
 #[derive(Clone, Serialize)]
-struct AgentConfig {
+pub struct AgentConfig {
     did: String
 }
 
-struct Agent {
-    id: String,
-    db: PickleDb,
-    state: State,
+struct Storage {
+    schema: PickleDb,
+    cred_def: PickleDb,
+    connection: PickleDb,
+    holder: PickleDb,
+    issuer: PickleDb,
+    verifier: PickleDb,
+    prover: PickleDb,
+}
+
+impl Storage {
+    pub fn new() -> Self {
+        Self {
+            schema: PickleDb::new("storage-schema.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
+            cred_def: PickleDb::new("storage-cred-def.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
+            connection: PickleDb::new("storage-connection.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
+            holder: PickleDb::new("storage-holder.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
+            issuer: PickleDb::new("storage-issuer.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
+            verifier: PickleDb::new("storage-verifier.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
+            prover: PickleDb::new("storage-prover.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
+        }
+    }
+}
+
+pub struct Agent {
+    dbs: Storage,
     status: Status,
     config: AgentConfig,
     last_connection: Option<Connection>
 }
 
-impl Agent {
-    fn get_state(&self) -> State {
-        self.state
-    }
-
-    fn set_state(&mut self, state: State) {
-        self.state = state;
-    }
-
-    fn get_status(&self) -> Status {
-        self.status
-    }
-
-    fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
+#[macro_export]
+macro_rules! soft_assert_eq {
+    ($left:expr, $right:expr) => ({
+        match (&$left, &$right) {
+            (left_val, right_val) => {
+                if !(*left_val == *right_val) {
+                    return Err(HarnessError::from_msg(HarnessErrorType::InternalServerError, &format!(r#"assertion failed: `(left == right)`
+  left: `{:?}`,
+ right: `{:?}`"#, left_val, right_val)));
+                }
+            }
+        }
+    });
 }
 
 #[actix_web::main]
@@ -103,32 +122,35 @@ async fn main() -> std::io::Result<()> {
         setup::shutdown();
     }).expect("Error setting Ctrl-C handler");
 
-    let config = setup::initialize().await.unwrap();
+    let host = std::env::var("HOST").unwrap_or("0.0.0.0".to_string());
+
+    let config = setup::initialize().await;
 
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
-            .wrap(middleware::NormalizePath::new(middleware::normalize::TrailingSlash::Trim))
-            .data(Mutex::new(Agent {
-                id: String::from("aries-vcx"),
-                db: PickleDb::new("storage.db", PickleDbDumpPolicy::AutoDump, SerializationMethod::Json),
-                state: State::Initial,
+            .wrap(middleware::NormalizePath::new(middleware::TrailingSlash::Trim))
+            .app_data(web::Data::new(Mutex::new(Agent {
+                dbs: Storage::new(),
                 status: Status::Active,
                 config: config.clone(),
                 last_connection: None
-            }))
+            })))
             .service(
                 web::scope("/agent")
                     .configure(connection::config)
                     .configure(schema::config)
                     .configure(credential_definition::config)
                     .configure(issuance::config)
+                    .configure(revocation::config)
                     .configure(presentation::config)
                     .configure(general::config)
             )
     })
+        .keep_alive(30)
+        .client_timeout(30000)
         .workers(1)
-        .bind(format!("0.0.0.0:{}", opts.port))?
+        .bind(format!("{}:{}", host, opts.port))?
         .run()
         .await
 }

@@ -33,12 +33,7 @@ FROM base as final
 WORKDIR /src
 ENV RUN_MODE="docker"
 
-# Prints logs to CLI, nog log file.
-# Let's wait with this until we have properly implemented logging in AFJ
-# ENV DEBUG="aries-framework-javascript"
-
 COPY javascript/server/package.json package.json
-COPY javascript/server/yarn.lock yarn.lock
 
 # Run install after copying only depdendency file
 # to make use of docker layer caching
@@ -46,7 +41,8 @@ RUN yarn install
 
 # Copy other depedencies
 COPY javascript/server .
+COPY javascript/ngrok-wait.sh ./ngrok-wait.sh
 
 # For now we use ts-node. Compiling with typescript
 # doesn't work because indy-sdk types are not exported
-ENTRYPOINT [ "yarn", "ts-node", "src/index.ts" ]
+ENTRYPOINT [ "bash", "ngrok-wait.sh"]

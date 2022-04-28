@@ -1,46 +1,56 @@
-import { $log } from "@tsed/common";
-import {
-  Agent,
-  HttpOutboundTransporter,
-  InitConfig,
-  LogLevel,
-} from "@aries-framework/core";
-import { agentDependencies, HttpInboundTransport } from "@aries-framework/node";
+import { $log } from '@tsed/common'
+import { Agent, InitConfig, MediatorPickupStrategy } from '@aries-framework/core'
+import { agentDependencies } from '@aries-framework/node'
 
-import { TsedLogger } from "./TsedLogger";
+import { TsedLogger } from './TsedLogger'
+import { TransportConfig } from './TestHarnessConfig'
 
 export async function createAgent({
-  port,
-  endpoint,
   publicDidSeed,
   genesisPath,
   agentName,
+  transport,
 }: {
-  port: number;
-  endpoint: string;
-  publicDidSeed: string;
-  genesisPath: string;
-  agentName: string;
+  publicDidSeed: string
+  genesisPath: string
+  agentName: string
+  transport: TransportConfig
 }) {
   // TODO: Public did does not seem to be registered
   // TODO: Schema is prob already registered
+
   const agentConfig: InitConfig = {
     label: agentName,
-    walletConfig: { id: `aath-javascript-${Date.now()}` },
-    walletCredentials: { key: "00000000000000000000000000000Test01" },
-    poolName: "aries-framework-javascript-pool",
-    endpoint,
+    walletConfig: {
+      id: `aath-javascript-${Date.now()}`,
+      key: '00000000000000000000000000000Test01',
+    },
+    indyLedgers: [
+      {
+        id: 'main-pool',
+        isProduction: false,
+        genesisPath,
+      },
+    ],
+    endpoints: transport.endpoints,
     publicDidSeed,
-    genesisPath,
+    // Needed to accept mediation requests: https://github.com/hyperledger/aries-framework-javascript/issues/668
+    autoAcceptMediationRequests: true,
+    useLegacyDidSovPrefix: true,
     logger: new TsedLogger($log),
-  };
+  }
 
-  const agent = new Agent(agentConfig, agentDependencies);
+  const agent = new Agent(agentConfig, agentDependencies)
 
-  agent.setInboundTransporter(new HttpInboundTransport({ port }));
-  agent.setOutboundTransporter(new HttpOutboundTransporter());
+  for (const it of transport.inboundTransports) {
+    agent.registerInboundTransport(it)
+  }
 
-  await agent.initialize();
+  for (const ot of transport.outboundTransports) {
+    agent.registerOutboundTransport(ot)
+  }
 
-  return agent;
+  await agent.initialize()
+
+  return agent
 }

@@ -11,7 +11,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | name | role      |
          | Acme | requester |
          | Bob  | responder |
-      When "Bob" sends an explicit invitation
+      When "Bob" sends an explicit invitation to "Acme"
       And "Acme" receives the invitation
       And "Acme" sends the request to "Bob"
       And "Bob" receives the request
@@ -29,7 +29,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | name | role      |
          | Acme | requester |
          | Bob  | responder |
-      When "Bob" sends an explicit invitation with a public DID
+      When "Bob" sends an explicit invitation with a public DID to "Acme"
       And "Acme" receives the invitation
       And "Acme" sends the request to "Bob"
       And "Bob" receives the request
@@ -48,7 +48,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | Acme | requester |
          | Bob  | responder |
       And "Bob" has a resolvable DID
-      And "Acme" aquires the resolvable DID
+      And "Acme" acquires the resolvable DID
       When "Acme" sends the request to "Bob" with the public DID
       And "Bob" receives the request with their public DID
       When "Bob" sends a response to "Acme"
@@ -67,7 +67,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | name | role      |
          | Acme | requester |
          | Bob  | responder |
-      When "Bob" sends an explicit invitation
+      When "Bob" sends an explicit invitation to "Acme"
       And "Acme" receives the invitation
       And "Acme" sends the request to "Bob"
       And "Bob" receives the request
@@ -83,7 +83,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | name | role      |
          | Acme | requester |
          | Bob  | responder |
-      When "Bob" sends an implicit invitation
+      When "Bob" sends an explicit invitation to "Acme"
       And "Acme" receives the invitation
       And "Acme" rejects the invitation
       And "Acme" restarts the connection process
@@ -95,7 +95,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | name | role      |
          | Acme | requester |
          | Bob  | responder |
-      When "Bob" sends an implicit invitation
+      When "Bob" sends an explicit invitation to "Acme"
       And "Acme" receives the invitation
       And "Acme" rejects the invitation
       And "Acme" abandons the connection process
@@ -107,7 +107,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | name | role      |
          | Acme | requester |
          | Bob  | responder |
-      When "Bob" sends an explicit invitation
+      When "Bob" sends an explicit invitation to "Acme"
       And "Acme" receives the invitation
       And "Acme" sends the request to "Bob"
       And "Bob" receives the request
@@ -132,7 +132,7 @@ Feature: RFC 0023 Establishing Connections with DID Exchange
          | name | role      |
          | Acme | requester |
          | Bob  | responder |
-      When "Bob" sends an explicit invitation
+      When "Bob" sends an explicit invitation to "Acme"
       And "Acme" receives the invitation
       And "Acme" sends the request to "Bob"
       And "Bob" receives the request
