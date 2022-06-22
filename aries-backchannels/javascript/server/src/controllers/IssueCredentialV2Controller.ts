@@ -14,8 +14,12 @@ import { BaseController } from '../BaseController'
 import { TestHarnessConfig } from '../TestHarnessConfig'
 import { ConnectionUtils } from '../utils/ConnectionUtils'
 
-@Controller('/agent/command/issue-credential')
-export class IssueCredentialController extends BaseController {
+const afjFormatToAathFormatMapping: Record<string, string> = {
+  indy: 'indy',
+}
+
+@Controller('/agent/command/issue-credential-v2')
+export class IssueCredentialV2Controller extends BaseController {
   private subject = new ReplaySubject<CredentialStateChangedEvent>()
 
   public constructor(testHarnessConfig: TestHarnessConfig) {
@@ -51,30 +55,33 @@ export class IssueCredentialController extends BaseController {
     @BodyParams('data')
     data: {
       connection_id: string
-      schema_issuer_did?: string
-      issuer_did?: string
-      schema_name?: string
-      cred_def_id?: string
-      schema_version?: string
-      schema_id?: string
-      credential_proposal: any
+      filter: {
+        indy: {
+          schema_issuer_did?: string
+          issuer_did?: string
+          schema_name?: string
+          cred_def_id?: string
+          schema_version?: string
+          schema_id?: string
+        }
+      }
+      credential_preview: any
     }
   ) {
-    const preview = JsonTransformer.fromJSON(data.credential_proposal, V1CredentialPreview)
-
+    const preview = JsonTransformer.fromJSON(data.credential_preview, V1CredentialPreview)
     const connection = await ConnectionUtils.getConnectionByConnectionIdOrOutOfBandId(this.agent, data.connection_id)
     const credentialRecord = await this.agent.credentials.proposeCredential({
       connectionId: connection.id,
-      protocolVersion: 'v1',
+      protocolVersion: 'v2',
       credentialFormats: {
         indy: {
           attributes: preview.attributes,
-          schemaIssuerDid: data.schema_issuer_did,
-          issuerDid: data.issuer_did,
-          schemaName: data.schema_name,
-          credentialDefinitionId: data.cred_def_id,
-          schemaVersion: data.schema_version,
-          schemaId: data.schema_id,
+          schemaIssuerDid: data.filter.indy.schema_issuer_did,
+          issuerDid: data.filter.indy.issuer_did,
+          schemaName: data.filter.indy.schema_name,
+          credentialDefinitionId: data.filter.indy.cred_def_id,
+          schemaVersion: data.filter.indy.schema_version,
+          schemaId: data.filter.indy.schema_id,
         },
       },
     })
@@ -88,29 +95,48 @@ export class IssueCredentialController extends BaseController {
     @BodyParams('data')
     data?: {
       connection_id: string
-      cred_def_id: string
+      filter: {
+        indy: {
+          schema_issuer_did?: string
+          issuer_did?: string
+          schema_name?: string
+          cred_def_id?: string
+          schema_version?: string
+          schema_id?: string
+        }
+      }
       credential_preview: any
     }
   ) {
     let credentialRecord: CredentialExchangeRecord
 
+    this.agent.config.logger.info('Sending credential offer', data)
+
     if (threadId) {
       await this.waitForState(threadId, CredentialState.ProposalReceived)
-      const { id } = await CredentialUtils.getCredentialByThreadId(this.agent, threadId)
+      let credentialRecord = await CredentialUtils.getCredentialByThreadId(this.agent, threadId)
+
+      this.agent.config.logger.info('Replying to credential proposal')
+
       credentialRecord = await this.agent.credentials.acceptProposal({
-        credentialRecordId: id,
+        credentialRecordId: credentialRecord.id,
       })
       return this.mapCredential(credentialRecord)
     } else if (data) {
       const preview = JsonTransformer.fromJSON(data.credential_preview, V1CredentialPreview)
       const connection = await ConnectionUtils.getConnectionByConnectionIdOrOutOfBandId(this.agent, data.connection_id)
+
+      if (!data.filter.indy.cred_def_id) {
+        throw new BadRequest('data.filter.indy.cred_def_id is required')
+      }
+
       credentialRecord = await this.agent.credentials.offerCredential({
         connectionId: connection.id,
-        protocolVersion: 'v1',
+        protocolVersion: 'v2',
         credentialFormats: {
           indy: {
             attributes: preview.attributes,
-            credentialDefinitionId: data.cred_def_id,
+            credentialDefinitionId: data.filter.indy.cred_def_id,
           },
         },
       })
@@ -163,12 +189,22 @@ export class IssueCredentialController extends BaseController {
   }
 
   private mapCredential(credentialRecord: CredentialExchangeRecord) {
-    const credentialId = credentialRecord.credentials[0]?.credentialRecordId
-
-    return {
+    let returnModel = {
       state: credentialRecord.state,
-      credential_id: credentialId,
       thread_id: credentialRecord.threadId,
     }
+
+    for (const credential of credentialRecord.credentials) {
+      const key = afjFormatToAathFormatMapping[credential.credentialRecordType]
+
+      returnModel = {
+        ...returnModel,
+        [key]: {
+          credential_id: credential.credentialRecordId,
+        },
+      }
+    }
+
+    return returnModel
   }
 }
